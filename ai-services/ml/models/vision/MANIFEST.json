@@ -1,0 +1,24 @@
+{
+  "model_name": "TruthChain Vision",
+  "architecture": "ResNet-50",
+  "task": "multi-label vehicle damage classification",
+  "classes": [
+    "dent",
+    "scratch",
+    "crack",
+    "glass_shatter",
+    "lamp_broken",
+    "tire_flat"
+  ],
+  "checkpoint": "truthchain_vision_resnet50.pth",
+  "thresholds": "vision_thresholds.json",
+  "preprocessing": "vision_preprocessing.json",
+  "performance": "vision_performance.json",
+  "test_outputs": "vision_test_outputs.npz",
+  "input_size": [
+    3,
+    224,
+    224
+  ],
+  "test_macro_f1": 0.8051
+}

@@ -1,0 +1,8 @@
+{
+  "dent": 0.35,
+  "scratch": 0.42,
+  "crack": 0.74,
+  "glass_shatter": 0.73,
+  "lamp_broken": 0.7,
+  "tire_flat": 0.86
+}

@@ -1,0 +1,29 @@
+{
+  "model": "TruthChain Vision ResNet-50",
+  "best_epoch": 4,
+  "validation": {
+    "macro_f1": 0.8318
+  },
+  "test": {
+    "macro_precision": 0.8116,
+    "macro_recall": 0.8083,
+    "macro_f1": 0.8051,
+    "weighted_f1": 0.814
+  },
+  "per_class_test_f1": {
+    "dent": 0.819209,
+    "scratch": 0.828784,
+    "crack": 0.545455,
+    "glass_shatter": 0.933333,
+    "lamp_broken": 0.770492,
+    "tire_flat": 0.933333
+  },
+  "thresholds": {
+    "dent": 0.35,
+    "scratch": 0.42,
+    "crack": 0.74,
+    "glass_shatter": 0.73,
+    "lamp_broken": 0.7,
+    "tire_flat": 0.86
+  }
+}

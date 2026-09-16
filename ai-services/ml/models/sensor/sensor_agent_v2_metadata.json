@@ -1,0 +1,44 @@
+{
+  "model_name": "SensorAgent",
+  "model_version": "sensor-agent-v2.0",
+  "algorithm": "IsolationForest",
+  "n_estimators": 200,
+  "random_state": 42,
+  "training_samples": 1474,
+  "test_samples": 369,
+  "features": [
+    "speed",
+    "accel_x",
+    "accel_y",
+    "accel_z",
+    "acceleration_magnitude",
+    "speed_change",
+    "acceleration_change",
+    "gps_distance",
+    "gps_speed",
+    "speed_gps_difference",
+    "speed_gps_ratio"
+  ],
+  "benchmark_samples": 250,
+  "benchmark_normal": 125,
+  "benchmark_anomalous": 125,
+  "accuracy": 0.948,
+  "precision": 0.9058,
+  "recall": 1.0,
+  "f1": 0.9506,
+  "fpr": 0.104,
+  "confusion_matrix": {
+    "TN": 112,
+    "FP": 13,
+    "FN": 0,
+    "TP": 125
+  },
+  "anomaly_type_recall": {
+    "speed_jump": 1.0,
+    "extreme_speed": 1.0,
+    "gps_speed_mismatch": 1.0,
+    "gps_jump": 1.0,
+    "extreme_acceleration": 1.0
+  },
+  "benchmark_note": "Controlled benchmark using synthetically injected telemetry inconsistencies. Results do not represent verified insurance-fraud detection accuracy."
+}
