@@ -61,10 +61,10 @@ htmlcov/
 *.log
 *.pid
 
-# Large generated model files
-*.pth
-*.pt
-*.onnx
+# Large generated model files (uncomment if using Git LFS or excluding large weights)
+# *.pth
+# *.pt
+# *.onnx
 
 # Temporary files
 *.tmp
