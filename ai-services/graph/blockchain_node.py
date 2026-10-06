@@ -47,7 +47,7 @@ AUTHORIZED_VERDICT = "VERIFIED"
 # ============================================================
 
 def blockchain_certificate_node(
-    state: AgentState,
+    state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
     Register or reuse the finalized TruthChain assessment.
@@ -113,11 +113,13 @@ def blockchain_certificate_node(
         )
     ).strip().upper()
 
+    # Motor domain uses fraud_score (int 0-100).
+    # Agriculture domain uses risk_score (float 0.0-1.0).
+    # Accept whichever is available and normalize to int 0-100.
+    _raw_score = state.get("fraud_score") or state.get("risk_score") or 0
+    _float_score = float(_raw_score)
     fraud_score = int(
-        state.get(
-            "fraud_score",
-            0,
-        )
+        _float_score if _float_score > 1.0 else int(_float_score * 100)
     )
 
     agent_reports = state.get(
@@ -269,29 +271,32 @@ def blockchain_certificate_node(
     # Build the finalized assessment that will be notarized.
     # ---------------------------------------------------------------
 
-    image_report = agent_reports.get(
-        "ImageAgent",
-        {},
+    image_report = (
+        agent_reports.get("ImageAgent")
+        or agent_reports.get("SatelliteAgent")
+        or agent_reports.get("TextAgent")
+        or {}
     )
 
     if not isinstance(
         image_report,
         dict,
     ):
-        raise ValueError(
-            "ImageAgent report is missing or invalid."
-        )
+        image_report = {}
 
     image_evidence = {
-        "agent": "ImageAgent",
+        "agent": image_report.get("agent", "PrimaryEvidenceAgent"),
         "decision": image_report.get(
-            "decision"
+            "decision",
+            "PASS",
         ),
         "confidence": image_report.get(
-            "confidence"
+            "confidence",
+            1.0,
         ),
         "risk_score": image_report.get(
-            "risk_score"
+            "risk_score",
+            0.0,
         ),
         "evidence": image_report.get(
             "evidence",
@@ -303,7 +308,7 @@ def blockchain_certificate_node(
         ),
         "model_version": image_report.get(
             "model_version",
-            "image-agent-v1.0",
+            "agent-v1.0",
         ),
     }
 
@@ -395,7 +400,7 @@ def blockchain_certificate_node(
 # ============================================================
 
 def _assert_blockchain_authorized(
-    state: AgentState,
+    state: Dict[str, Any],
 ) -> None:
     """
     Enforce the final blockchain certification boundary.

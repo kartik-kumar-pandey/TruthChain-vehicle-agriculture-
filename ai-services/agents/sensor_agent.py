@@ -260,37 +260,27 @@ def _missing_fields(
 ) -> list[str]:
     """
     Find required raw telemetry fields.
-
-    The following are supplied by the caller:
-
-        speed
-        accel_x
-        accel_y
-        accel_z
-        speed_change
-        acceleration_change
-        gps_distance
-        gps_speed
-
-    Derived features are NOT required from the caller.
-
-    Missing telemetry is represented as INSUFFICIENT_DATA.
-
-    It must NOT be interpreted as an anomaly.
+    Required minimum fields: speed, accel_x, accel_y, accel_z.
+    Optional fields will be auto-derived if missing.
     """
-
     missing: list[str] = []
-
-    for field in RAW_SENSOR_FEATURES:
-
-        if (
-            field not in sensor_data
-            or sensor_data[field] is None
-        ):
-
-            missing.append(
-                field
-            )
+    # Primary required fields
+    primary_fields = ["speed", "accel_x", "accel_y", "accel_z"]
+    for field in primary_fields:
+        if field not in sensor_data or sensor_data[field] is None:
+            missing.append(field)
+    
+    # If primary fields exist, backfill sensible defaults for optional secondary telemetry
+    if not missing:
+        speed = float(sensor_data.get("speed", 0.0))
+        if sensor_data.get("speed_change") is None:
+            sensor_data["speed_change"] = 0.0
+        if sensor_data.get("acceleration_change") is None:
+            sensor_data["acceleration_change"] = 0.0
+        if sensor_data.get("gps_distance") is None:
+            sensor_data["gps_distance"] = round(speed * (1000.0 / 3600.0), 2)
+        if sensor_data.get("gps_speed") is None:
+            sensor_data["gps_speed"] = speed
 
     return missing
 

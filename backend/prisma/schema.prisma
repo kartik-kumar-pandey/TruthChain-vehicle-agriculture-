@@ -1,0 +1,417 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum UserRole {
+  ORGANIZATION_ADMIN
+  INVESTIGATOR
+  REVIEWER
+  AUDITOR
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum ClaimDomain {
+  MOTOR
+  AGRICULTURE
+}
+
+enum ClaimStatus {
+  SUBMITTED
+  QUEUED
+  PROCESSING
+  COMPLETED
+  REVIEW_REQUIRED
+  FAILED
+  CANCELLED
+}
+
+enum AssessmentStatus {
+  PROCESSING
+  COMPLETED
+  REVIEW_REQUIRED
+  FAILED
+}
+
+enum AgentRunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
+enum EvidenceType {
+  EVIDENCE
+  CONTRADICTION
+  OBSERVATION
+  REASONING
+}
+
+enum BlockchainStatus {
+  PENDING
+  REGISTERED
+  ALREADY_REGISTERED
+  FAILED
+}
+
+model Organization {
+  id        String             @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String             @unique
+  status    OrganizationStatus @default(ACTIVE)
+
+  users     User[]
+  policies  Policy[]
+  claims    Claim[]
+  audits    AuditEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("organizations")
+}
+
+model User {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  externalAuthId String
+  email          String
+  firstName      String?
+  lastName       String?
+  role           UserRole     @default(INVESTIGATOR)
+  status         UserStatus   @default(ACTIVE)
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  submittedClaims Claim[]     @relation("ClaimSubmittedBy")
+  audits         AuditEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, externalAuthId])
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@map("users")
+}
+
+model Claim {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  policyId       String?      @db.Uuid
+  claimNumber    String
+  domain         ClaimDomain  @default(MOTOR)
+  status         ClaimStatus  @default(SUBMITTED)
+  description    String?
+  submittedById  String?      @db.Uuid
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  policy         Policy?      @relation(fields: [policyId], references: [id], onDelete: SetNull)
+  submittedBy    User?        @relation("ClaimSubmittedBy", fields: [submittedById], references: [id], onDelete: SetNull)
+
+  images         ClaimImage[]
+  sensorReadings SensorReading[]
+  assessment     Assessment?
+  audits         AuditEvent[]
+  processingJobs ProcessingJob[]
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  completedAt    DateTime?
+
+  @@unique([organizationId, claimNumber])
+  @@index([organizationId])
+  @@index([policyId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("claims")
+}
+
+model ClaimImage {
+  id               String   @id @default(uuid()) @db.Uuid
+  claimId          String   @db.Uuid
+  storageProvider  String
+  storageKey       String
+  originalFilename String?
+  mimeType         String
+  fileSizeBytes    BigInt
+  sha256Hash       String   @db.Char(64)
+  width            Int?
+  height           Int?
+  imageType        String?
+
+  claim            Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([claimId])
+  @@index([sha256Hash])
+  @@map("claim_images")
+}
+
+model SensorReading {
+  id         String   @id @default(uuid()) @db.Uuid
+  claimId    String   @db.Uuid
+  source     String?
+  payload    Json
+  capturedAt DateTime?
+
+  claim      Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([claimId])
+  @@map("sensor_readings")
+}
+
+model Assessment {
+  id                String             @id @default(uuid()) @db.Uuid
+  claimId           String             @unique @db.Uuid
+  status            AssessmentStatus   @default(PROCESSING)
+  finalVerdict      String?
+  fraudScore        Decimal?           @db.Decimal(5, 2)
+  modelVersion      String?
+  startedAt         DateTime           @default(now())
+  completedAt       DateTime?
+
+  claim             Claim              @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  agentRuns         AgentRun[]
+  riskScores        RiskScore[]
+  blockchainRecord  BlockchainRecord?
+
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([status])
+  @@index([finalVerdict])
+  @@map("assessments")
+}
+
+model AgentRun {
+  id               String         @id @default(uuid()) @db.Uuid
+  assessmentId     String         @db.Uuid
+  agentName        String
+  status           AgentRunStatus
+  decision         String?
+  confidence       Decimal?       @db.Decimal(6, 5)
+  riskScore        Decimal?       @db.Decimal(6, 5)
+  modelVersion     String?
+  processingTimeMs Int?
+  errorCode        String?
+  errorMessage     String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+
+  assessment       Assessment     @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  evidence         AgentEvidence[]
+
+  createdAt        DateTime       @default(now())
+
+  @@index([assessmentId])
+  @@index([agentName])
+  @@index([status])
+  @@map("agent_runs")
+}
+
+model AgentEvidence {
+  id           String       @id @default(uuid()) @db.Uuid
+  agentRunId   String       @db.Uuid
+  evidenceType EvidenceType
+  content      String
+  metadata     Json?
+
+  agentRun     AgentRun     @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime     @default(now())
+
+  @@index([agentRunId])
+  @@map("agent_evidence")
+}
+
+model RiskScore {
+  id                 String     @id @default(uuid()) @db.Uuid
+  assessmentId       String     @db.Uuid
+  imageRisk          Decimal?   @db.Decimal(6, 5)
+  sensorRisk         Decimal?   @db.Decimal(6, 5)
+  textRisk           Decimal?   @db.Decimal(6, 5)
+  crossModalRisk     Decimal?   @db.Decimal(6, 5)
+  investigationRisk  Decimal?   @db.Decimal(6, 5)
+  verifierRisk       Decimal?   @db.Decimal(6, 5)
+  finalScore         Decimal?   @db.Decimal(5, 2)
+  decision           String?
+
+  assessment         Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+
+  createdAt           DateTime   @default(now())
+
+  @@index([assessmentId])
+  @@map("risk_scores")
+}
+
+model BlockchainRecord {
+  id               String           @id @default(uuid()) @db.Uuid
+  assessmentId     String           @unique @db.Uuid
+  network          String
+  contractAddress  String
+  recordId         String
+  transactionHash  String?
+  blockNumber      BigInt?
+  imageHash        String?
+  predictionHash   String?
+  status           BlockchainStatus
+  recorderAddress  String?
+  registeredAt     DateTime?
+
+  assessment       Assessment       @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@unique([network, recordId])
+  @@index([transactionHash])
+  @@index([network])
+  @@map("blockchain_records")
+}
+
+model AuditEvent {
+  id             String        @id @default(uuid()) @db.Uuid
+  organizationId String?       @db.Uuid
+  userId         String?       @db.Uuid
+  claimId        String?       @db.Uuid
+  eventType      String
+  entityType     String?
+  entityId       String?       @db.Uuid
+  metadata       Json?
+  ipAddress      String?
+  userAgent      String?
+
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  claim          Claim?        @relation(fields: [claimId], references: [id], onDelete: SetNull)
+
+  createdAt      DateTime      @default(now())
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([claimId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("audit_events")
+}
+
+model Policy {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  policyNumber   String
+  holderName     String?
+  coverageType   String?
+  effectiveDate  DateTime?
+  expirationDate DateTime?
+  status         String       @default("ACTIVE")
+  metadata       Json?
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  claims         Claim[]
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, policyNumber])
+  @@index([organizationId])
+  @@map("policies")
+}
+
+model ProcessingJob {
+  id           String    @id @default(uuid()) @db.Uuid
+  claimId      String?   @db.Uuid
+  jobType      String
+  status       String    @default("QUEUED")
+  payload      Json?
+  result       Json?
+  errorMessage String?
+  attempts     Int       @default(0)
+  startedAt    DateTime?
+  completedAt  DateTime?
+
+  claim        Claim?    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([claimId])
+  @@index([status])
+  @@map("processing_jobs")
+}
+
+model AuthUser {
+  id            String        @id
+  name          String
+  email         String        @unique
+  emailVerified Boolean       @default(false)
+  image         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  sessions      AuthSession[]
+  accounts      AuthAccount[]
+
+  @@map("auth_user")
+}
+
+model AuthSession {
+  id        String   @id
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("auth_session")
+}
+
+model AuthAccount {
+  id                    String    @id
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  idToken               String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  AuthUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("auth_account")
+}
+
+model AuthVerification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("auth_verification")
+}

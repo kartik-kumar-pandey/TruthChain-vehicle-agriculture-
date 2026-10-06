@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TruthChain 2.0 - Multimodal Insurance Verification System</title>
+  <!-- Google Fonts & Leaflet CSS -->
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {
+      --bg-color: #0b0f19;
+      --card-bg: rgba(18, 26, 44, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-agri: #10b981;
+      --accent-motor: #3b82f6;
+      --accent-glow: rgba(16, 185, 129, 0.25);
+      --text-main: #f3f4f6;
+      --text-sub: #9ca3af;
+      --font-family: 'Outfit', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg-color);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(16, 185, 129, 0.1) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(59, 130, 246, 0.1) 0px, transparent 50%);
+      color: var(--text-main);
+      font-family: var(--font-family);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    .container { max-width: 1280px; margin: 0 auto; }
+    header { text-align: center; margin-bottom: 2.5rem; }
+    header h1 { font-size: 2.5rem; font-weight: 700; background: linear-gradient(135deg, #10b981, #60a5fa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    header p { color: var(--text-sub); margin-top: 0.5rem; font-size: 1.1rem; }
+
+    /* Domain Tabs */
+    .tabs { display: flex; justify-content: center; gap: 1rem; margin-bottom: 2rem; }
+    .tab-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-sub);
+      padding: 0.85rem 1.75rem;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .tab-btn:hover { color: var(--text-main); border-color: var(--accent-agri); }
+    .tab-btn.active-agri {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.05));
+      border-color: var(--accent-agri);
+      color: #34d399;
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    /* Grid Layout */
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+    }
+    @media (max-width: 1024px) {
+      .dashboard-grid { grid-template-columns: 1fr; }
+    }
+
+    /* Card Styling */
+    .glass-card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      padding: 2rem;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    .card-title {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 0.75rem;
+    }
+
+    /* Form Fields */
+    .form-group { margin-bottom: 1.25rem; }
+    .form-group label { display: block; font-size: 0.9rem; color: var(--text-sub); margin-bottom: 0.4rem; font-weight: 500; }
+    .form-control {
+      width: 100%;
+      background: rgba(10, 15, 26, 0.8);
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 0.8rem 1rem;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      font-family: inherit;
+      transition: border-color 0.2s;
+    }
+    .form-control:focus { outline: none; border-color: var(--accent-agri); }
+
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+    /* Map Box */
+    #map { height: 240px; border-radius: 12px; margin-top: 0.5rem; border: 1px solid var(--card-border); }
+
+    /* File Dropzone */
+    .file-dropzone {
+      border: 2px dashed var(--card-border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: rgba(10, 15, 26, 0.5);
+    }
+    .file-dropzone:hover { border-color: var(--accent-agri); background: rgba(16, 185, 129, 0.05); }
+
+    /* Submit Button */
+    .btn-submit {
+      width: 100%;
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #fff;
+      padding: 1rem;
+      border: none;
+      border-radius: 12px;
+      font-size: 1.1rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 20px var(--accent-glow);
+      transition: transform 0.2s, box-shadow 0.2s;
+      margin-top: 1rem;
+    }
+    .btn-submit:hover { transform: translateY(-2px); box-shadow: 0 6px 25px rgba(16, 185, 129, 0.4); }
+
+    /* Pipeline Step Tracker */
+    .stepper { display: flex; flex-direction: column; gap: 0.75rem; }
+    .step-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(10, 15, 26, 0.6);
+      padding: 0.75rem 1rem;
+      border-radius: 10px;
+      border-left: 4px solid var(--text-sub);
+      transition: all 0.3s;
+    }
+    .step-item.PASS { border-left-color: #10b981; }
+    .step-item.SUSPICIOUS { border-left-color: #f59e0b; }
+    .step-item.REVIEW_REQUIRED { border-left-color: #f59e0b; }
+    .step-item.ERROR { border-left-color: #ef4444; }
+    .step-name { font-weight: 600; font-size: 0.95rem; }
+    .step-badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      text-transform: uppercase;
+    }
+    .badge-PASS { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .badge-SUSPICIOUS { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .badge-REVIEW_REQUIRED { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .badge-ERROR { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    .badge-INSUFFICIENT_DATA { background: rgba(156, 163, 175, 0.2); color: #9ca3af; }
+
+    /* Verdict Banner */
+    .verdict-box {
+      text-align: center;
+      padding: 1.5rem;
+      border-radius: 14px;
+      margin-bottom: 1.5rem;
+      background: rgba(10, 15, 26, 0.9);
+      border: 1px solid var(--card-border);
+    }
+    .verdict-title { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.3rem; }
+    .verdict-sub { color: var(--text-sub); font-size: 0.9rem; }
+
+    /* Agent Report Cards */
+    .report-details { margin-top: 1rem; max-height: 400px; overflow-y: auto; padding-right: 0.5rem; }
+    .report-card {
+      background: rgba(10, 15, 26, 0.6);
+      border-radius: 10px;
+      padding: 1rem;
+      margin-bottom: 0.75rem;
+      border: 1px solid var(--card-border);
+    }
+    .report-card-header { display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-weight: 600; }
+    .evidence-list { font-size: 0.85rem; color: var(--text-sub); list-style-type: disc; padding-left: 1.25rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>TruthChain 2.0</h1>
+      <p>AI Multimodal Evidence & Risk Verification Network</p>
+    </header>
+
+    <div class="tabs">
+      <button class="tab-btn active-agri" id="tab-agri">
+        🌾 Agriculture Claim Pipeline
+      </button>
+    </div>
+
+    <div class="dashboard-grid">
+      <!-- Left: Claim Submission Form -->
+      <div class="glass-card">
+        <div class="card-title">
+          <span>Submit Agriculture Claim</span>
+          <span style="font-size: 0.8rem; color: var(--accent-agri);" id="system-status">● Sentinel-2 Active</span>
+        </div>
+
+        <form id="agri-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="claim_id">Claim ID</label>
+              <input type="text" class="form-control" id="claim_id" value="AGRI-001" required />
+            </div>
+            <div class="form-group">
+              <label for="crop">Crop</label>
+              <select class="form-control" id="crop">
+                <option value="Wheat" selected>Wheat</option>
+                <option value="Paddy">Paddy (Rice)</option>
+                <option value="Mustard">Mustard</option>
+                <option value="Lentil">Lentil</option>
+                <option value="Sugarcane">Sugarcane</option>
+                <option value="Maize">Maize</option>
+                <option value="Potato">Potato</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="field_area">Field Area (Hectares)</label>
+              <input type="number" step="0.1" class="form-control" id="field_area" value="2.0" required />
+            </div>
+            <div class="form-group">
+              <label for="event">Peril / Event</label>
+              <select class="form-control" id="event">
+                <option value="Heavy rain" selected>Heavy Rain / Flood</option>
+                <option value="Hailstorm">Hailstorm</option>
+                <option value="Drought">Drought</option>
+                <option value="Pest Attack">Pest Attack</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="event_date">Event Date</label>
+              <input type="date" class="form-control" id="event_date" value="2026-09-17" required />
+            </div>
+            <div class="form-group">
+              <label for="claimed_loss">Claimed Loss (%)</label>
+              <input type="number" class="form-control" id="claimed_loss" value="65" min="1" max="100" required />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="location">Location</label>
+            <input type="text" class="form-control" id="location" value="Village Rampur, District Lucknow" required />
+          </div>
+
+          <div class="form-group">
+            <label>Field Boundary Selection (Interactive Map)</label>
+            <div id="map"></div>
+          </div>
+
+          <div class="form-group">
+            <label>Crop / Field Photograph</label>
+            <div class="file-dropzone" id="dropzone">
+              <span id="file-label">📸 Click to upload photo (or sample green crop image used)</span>
+              <input type="file" id="image-file" accept="image/*" style="display: none;" />
+            </div>
+          </div>
+
+          <button type="submit" class="btn-submit" id="submit-btn">
+            SUBMIT CLAIM FOR MULTI-AGENT ASSESSMENT
+          </button>
+        </form>
+      </div>
+
+      <!-- Right: Real-time Multi-Agent Graph Results -->
+      <div class="glass-card">
+        <div class="card-title">
+          <span>Verification & Consensus Output</span>
+          <span style="font-size: 0.8rem; color: var(--text-sub);" id="timer">--</span>
+        </div>
+
+        <div id="results-placeholder" style="text-align: center; padding: 4rem 1rem; color: var(--text-sub);">
+          <div style="font-size: 3rem; margin-bottom: 1rem;">📡</div>
+          <p>Submit a claim to trigger the LangGraph 10-Agent Verification Pipeline.</p>
+        </div>
+
+        <div id="results-container" style="display: none;">
+          <div class="verdict-box" id="verdict-card">
+            <div class="verdict-title" id="verdict-text">PENDING</div>
+            <div class="verdict-sub" id="verdict-sub">Consensus Risk Score: <span id="risk-score-val">0%</span></div>
+          </div>
+
+          <h4 style="margin-bottom: 0.75rem; font-size: 0.95rem; color: var(--text-sub);">GRAPH WORKFLOW STEPPER</h4>
+          <div class="stepper" id="stepper"></div>
+
+          <h4 style="margin-top: 1.5rem; margin-bottom: 0.75rem; font-size: 0.95rem; color: var(--text-sub);">DETAILED EVIDENCE REPORTS</h4>
+          <div class="report-details" id="reports-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Initialize Leaflet Map around Lucknow/Rampur
+    const map = L.map('map').setView([26.452, 80.192], 15);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    // Default polygon
+    const polygonCoords = [
+      [26.452279, 80.192203],
+      [26.451376, 80.192209],
+      [26.451370, 80.191206],
+      [26.452273, 80.191200]
+    ];
+
+    const polygon = L.polygon(polygonCoords, {
+      color: '#10b981',
+      fillColor: '#10b981',
+      fillOpacity: 0.35
+    }).addTo(map);
+
+    map.fitBounds(polygon.getBounds());
+
+    // Dropzone upload UI
+    const dropzone = document.getElementById('dropzone');
+    const imageInput = document.getElementById('image-file');
+    const fileLabel = document.getElementById('file-label');
+
+    dropzone.addEventListener('click', () => imageInput.click());
+    imageInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        fileLabel.innerText = "Selected: " + e.target.files[0].name;
+      }
+    });
+
+    // Form Submission
+    const agriForm = document.getElementById('agri-form');
+    const submitBtn = document.getElementById('submit-btn');
+
+    agriForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      submitBtn.innerText = "RUNNING LANGGRAPH MULTI-AGENT VERIFICATION...";
+      submitBtn.disabled = true;
+
+      document.getElementById('results-placeholder').style.display = 'none';
+      document.getElementById('results-container').style.display = 'block';
+
+      const payload = {
+        claim_id: document.getElementById('claim_id').value,
+        domain: "agriculture",
+        claimed_crop: document.getElementById('crop').value,
+        field_area_hectares: parseFloat(document.getElementById('field_area').value),
+        event: document.getElementById('event').value,
+        event_date: document.getElementById('event_date').value,
+        location: document.getElementById('location').value,
+        claimed_loss_percent: parseFloat(document.getElementById('claimed_loss').value),
+        image: "data/uploaded_crop_image.jpg",
+        field_geojson: {
+          type: "Polygon",
+          coordinates: [[
+            [80.192203, 26.452279],
+            [80.192209, 26.451376],
+            [80.191206, 26.451370],
+            [80.191200, 26.452273],
+            [80.192203, 26.452279]
+          ]]
+        }
+      };
+
+      const start = Date.now();
+
+      try {
+        const response = await fetch('/api/v1/agriculture/claim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const res = await response.json();
+        const data = res.data;
+
+        const duration = ((Date.now() - start) / 1000).toFixed(2);
+        document.getElementById('timer').innerText = `${duration}s`;
+
+        // Render Verdict
+        const verdict = data.final_verdict || "UNKNOWN";
+        const risk = ((data.risk_score || 0) * 100).toFixed(1);
+
+        document.getElementById('verdict-text').innerText = verdict;
+        document.getElementById('risk-score-val').innerText = `${risk}%`;
+
+        // Stepper
+        const stepper = document.getElementById('stepper');
+        stepper.innerHTML = '';
+
+        const steps = data.steps || [];
+        steps.forEach(st => {
+          const name = st.agent || st.step;
+          const dec = st.decision || "COMPLETE";
+
+          const item = document.createElement('div');
+          item.className = `step-item ${dec}`;
+          item.innerHTML = `
+            <span class="step-name">${name}</span>
+            <span class="step-badge badge-${dec}">${dec}</span>
+          `;
+          stepper.appendChild(item);
+        });
+
+        // Reports
+        const reportsList = document.getElementById('reports-list');
+        reportsList.innerHTML = '';
+
+        const reports = data.agent_reports || {};
+        for (const [agentName, rep] of Object.entries(reports)) {
+          const dec = rep.decision || "INFO";
+          const card = document.createElement('div');
+          card.className = 'report-card';
+
+          const evidenceItems = (rep.evidence || []).map(ev => `<li>${ev}</li>`).join('');
+
+          card.innerHTML = `
+            <div class="report-card-header">
+              <span>${agentName}</span>
+              <span class="step-badge badge-${dec}">${dec}</span>
+            </div>
+            <ul class="evidence-list">
+              ${evidenceItems || '<li>Assessment complete.</li>'}
+            </ul>
+          `;
+          reportsList.appendChild(card);
+        }
+
+      } catch (err) {
+        alert("Error invoking verification graph: " + err);
+      } finally {
+        submitBtn.innerText = "SUBMIT CLAIM FOR MULTI-AGENT ASSESSMENT";
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

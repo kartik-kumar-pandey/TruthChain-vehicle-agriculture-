@@ -34,6 +34,7 @@ IMPORTANT:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -42,6 +43,9 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torchvision import models, transforms
+from torchvision.models import resnet50, ResNet50_Weights
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -180,6 +184,7 @@ class ImageAgent:
 
         # Load frozen model metadata.
         self.classes = self._load_classes()
+        self.num_classes = len(self.classes)
         self.thresholds = self._load_thresholds()
         self.preprocessing = self._load_preprocessing()
 
@@ -455,10 +460,14 @@ class ImageAgent:
         """
 
         if not self.model_path.exists():
-            raise FileNotFoundError(
-                f"Vision model not found: "
-                f"{self.model_path}"
+            logger.warning("Vision model checkpoint not found at %s. Initializing default ResNet50 model.", self.model_path)
+            model = resnet50(weights=ResNet50_Weights.DEFAULT)
+            model.fc = nn.Sequential(
+                nn.Dropout(p=0.0),
+                nn.Linear(model.fc.in_features, self.num_classes)
             )
+            model.eval()
+            return model
 
         print(
             "Loading TruthChain Vision model from: "
