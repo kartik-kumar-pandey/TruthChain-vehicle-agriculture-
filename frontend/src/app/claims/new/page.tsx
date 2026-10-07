@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useEffect } from "react";
+import FieldMapDraw from "@/components/ui/FieldMapDraw";
 import { useRouter } from "next/navigation";
 import { useForm, useWatch, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -172,12 +173,12 @@ export default function CreateClaimPage() {
       vehicle_make_model: "",
       incident_date: "",
       incident_location: "",
-      crop: "Wheat",
-      field_area_hectares: 2.0,
-      event: "Heavy rain",
-      event_date: "17 September 2026",
-      location: "Village Rampur, District Lucknow",
-      claimed_loss_percent: 65.0,
+      crop: "",
+      field_area_hectares: undefined,
+      event: "",
+      event_date: "",
+      location: "",
+      claimed_loss_percent: undefined,
       image_file: null,
       speed: undefined,
       accel_x: undefined,
@@ -337,8 +338,8 @@ export default function CreateClaimPage() {
     setIsCameraActive(false);
   };
 
-  const latVal = useWatch({ control, name: "latitude" }) ?? 26.8467;
-  const lngVal = useWatch({ control, name: "longitude" }) ?? 80.9462;
+  const latVal = useWatch({ control, name: "latitude" }) ?? 26.3155;
+  const lngVal = useWatch({ control, name: "longitude" }) ?? 80.1255;
 
   // Draw Live ESRI Satellite Tile, Plot Boundary, and Vertices on Canvas
   useEffect(() => {
@@ -527,19 +528,39 @@ export default function CreateClaimPage() {
 
   const onSubmit = handleSubmit(async (values) => {
     if (selectedDomain === "agriculture") {
+      // Extract centroid from drawn polygon for lat/lng if not manually set
+      let finalLat = values.latitude;
+      let finalLng = values.longitude;
+      let fieldGeoJSON: Record<string, unknown> | null = null;
+
+      if (values.field_geojson) {
+        try {
+          fieldGeoJSON = JSON.parse(values.field_geojson);
+          // Compute centroid from polygon coordinates if lat/lng not explicitly set
+          if (!finalLat || !finalLng) {
+            const coords = (fieldGeoJSON as { coordinates: number[][][] }).coordinates[0];
+            const sumLng = coords.slice(0, -1).reduce((s, c) => s + c[0], 0);
+            const sumLat = coords.slice(0, -1).reduce((s, c) => s + c[1], 0);
+            const count = coords.length - 1;
+            finalLng = parseFloat((sumLng / count).toFixed(6));
+            finalLat = parseFloat((sumLat / count).toFixed(6));
+          }
+        } catch { /* ignore parse error */ }
+      }
+
       const agriPayload: Record<string, unknown> = {
         claim_id: values.claim_id,
         domain: "agriculture",
         crop: values.crop || "Wheat",
         field_area_hectares: values.field_area_hectares || 2.0,
         event: values.event || "Heavy rain",
-        event_date: values.event_date || "17 September 2026",
-        location: values.location || "Village Rampur, District Lucknow",
-        claimed_loss_percent: values.claimed_loss_percent || 65.0,
+        event_date: values.event_date || "",
+        location: values.location || "",
+        claimed_loss_percent: values.claimed_loss_percent || 0,
         claim_text: values.description,
-        latitude: values.latitude || 26.8467,
-        longitude: values.longitude || 80.9462,
-        field_geojson: values.field_geojson ? JSON.parse(values.field_geojson) : {
+        latitude: finalLat ?? 26.8467,
+        longitude: finalLng ?? 80.9462,
+        field_geojson: fieldGeoJSON ?? {
           type: "Polygon",
           coordinates: [[[80.9460, 26.8465], [80.9468, 26.8465], [80.9468, 26.8472], [80.9460, 26.8472], [80.9460, 26.8465]]]
         }
@@ -550,9 +571,9 @@ export default function CreateClaimPage() {
           const dataUrl = await readFileAsDataURL(values.image_file);
           agriPayload.image = dataUrl;
           agriPayload.image_metadata = {
-            latitude: values.latitude || 26.8467,
-            longitude: values.longitude || 80.9462,
-            timestamp: values.event_date || "2026-09-17"
+            latitude: finalLat ?? 26.8467,
+            longitude: finalLng ?? 80.9462,
+            timestamp: values.event_date || new Date().toISOString().split("T")[0],
           };
         } catch {
           // ignore
@@ -664,6 +685,19 @@ export default function CreateClaimPage() {
                 onClick={() => {
                   setSelectedDomain("motor");
                   setValue("domain", "motor");
+                  // Clear agriculture-specific fields when switching to motor
+                  setValue("crop", "");
+                  setValue("field_area_hectares", undefined);
+                  setValue("event", "");
+                  setValue("event_date", "");
+                  setValue("location", "");
+                  setValue("claimed_loss_percent", undefined);
+                  setValue("latitude", undefined);
+                  setValue("longitude", undefined);
+                  setValue("field_geojson", "");
+                  setPolygonPoints([]);
+                  setSatPreview(null);
+                  setFieldConfirmed(false);
                 }}
                 className={cn(
                   "flex flex-col items-start p-4 rounded-xl border text-left transition-all",
@@ -688,6 +722,16 @@ export default function CreateClaimPage() {
                 onClick={() => {
                   setSelectedDomain("agriculture");
                   setValue("domain", "agriculture");
+                  // Clear motor-specific fields when switching to agriculture
+                  setValue("policy_number", "");
+                  setValue("vehicle_registration", "");
+                  setValue("vehicle_make_model", "");
+                  setValue("incident_date", "");
+                  setValue("incident_location", "");
+                  setValue("speed", undefined);
+                  setValue("accel_x", undefined);
+                  setValue("accel_y", undefined);
+                  setValue("accel_z", undefined);
                 }}
                 className={cn(
                   "flex flex-col items-start p-4 rounded-xl border text-left transition-all",
@@ -762,43 +806,59 @@ export default function CreateClaimPage() {
                   <div className="flex items-center justify-between">
                     <Label className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
                       <Compass className="h-4 w-4" />
-                      Satellite Map Field Draw (Tap field boundary corners to draw plot)
+                      Field Boundary Map — Draw your field polygon on the satellite map
                     </Label>
                     <Button type="button" variant="outline" size="sm" onClick={clearCanvasPolygon} className="h-6 text-[11px] text-slate-400">
                       Clear Field
                     </Button>
                   </div>
-                  <div className="relative border border-emerald-900/50 rounded-xl bg-slate-950 p-2 overflow-hidden flex flex-col items-center">
-                    <canvas
-                      ref={canvasRef}
-                      width={380}
-                      height={180}
-                      onClick={handleCanvasClick}
-                      className="cursor-crosshair bg-slate-900 border border-slate-800 rounded-lg shadow-inner"
-                    />
-                    <div className="text-[11px] text-slate-400 mt-1.5 font-mono flex items-center gap-2">
-                      {polygonPoints.length === 0
-                        ? "✏️ Tap points on the satellite grid to outline your farm boundary"
-                        : `✓ ${polygonPoints.length} boundary points set · Area auto-calculated`}
-                    </div>
 
-                    {/* Confirm Field & Fetch Sentinel-2 Preview */}
-                    {polygonPoints.length >= 3 && !fieldConfirmed && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={fetchSatellitePreview}
-                        disabled={satLoading}
-                        className="mt-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs"
-                      >
-                        {satLoading ? (
-                          <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> Searching Sentinel-2…</>
-                        ) : (
-                          <><Satellite className="h-3.5 w-3.5 mr-1" /> Confirm Field & Fetch Satellite Imagery</>
-                        )}
-                      </Button>
-                    )}
+                  {/* Real Leaflet Satellite Map with Draw Tool */}
+                  <FieldMapDraw
+                    center={[latVal ?? 26.8467, lngVal ?? 80.9462]}
+                    onPolygonChange={(geojson, hectares) => {
+                      if (geojson) {
+                        setValue("field_geojson", JSON.stringify(geojson));
+                        setValue("field_area_hectares", hectares);
+                        setPolygonPoints([{ x: 0, y: 0 }]); // mark as having polygon
+                      } else {
+                        setValue("field_geojson", "");
+                        setValue("field_area_hectares", undefined);
+                        setPolygonPoints([]);
+                      }
+                      setSatPreview(null);
+                      setFieldConfirmed(false);
+                    }}
+                    onLocationDetected={({ locationStr, lat, lng }) => {
+                      setValue("location", locationStr);
+                      setValue("latitude", parseFloat(lat.toFixed(6)));
+                      setValue("longitude", parseFloat(lng.toFixed(6)));
+                    }}
+                  />
+
+                  <div className="text-[11px] text-slate-400 font-mono flex items-center gap-2 px-1">
+                    {polygonPoints.length === 0
+                      ? "✏️ Use the polygon draw tool (pentagon icon) on the map to outline your farm boundary"
+                      : `✓ Field polygon drawn · Area auto-calculated from coordinates`}
                   </div>
+
+                  {/* Confirm Field & Fetch Sentinel-2 Preview */}
+                  {polygonPoints.length >= 1 && !fieldConfirmed && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={fetchSatellitePreview}
+                      disabled={satLoading}
+                      className="mt-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs"
+                    >
+                      {satLoading ? (
+                        <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> Searching Sentinel-2…</>
+                      ) : (
+                        <><Satellite className="h-3.5 w-3.5 mr-1" /> Confirm Field & Fetch Satellite Imagery</>
+                      )}
+                    </Button>
+                  )}
+
 
                   {/* ── Sentinel-2 Satellite Preview Panel ── */}
                   {satLoading && (
