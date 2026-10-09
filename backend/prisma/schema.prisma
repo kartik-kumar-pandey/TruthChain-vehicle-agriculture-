@@ -415,3 +415,22 @@ model AuthVerification {
 
   @@map("auth_verification")
 }
+
+model OffchainAssessment {
+  recordId            String   @id @map("record_id") @db.VarChar(64)
+  vehicleId           String?  @map("vehicle_id") @db.VarChar(64)
+  imageHash           String   @map("image_hash") @db.VarChar(64)
+  imageStorageUri     String?  @map("image_storage_uri")
+  predictionHash      String   @map("prediction_hash") @db.VarChar(64)
+  canonicalPrediction Json?    @map("canonical_prediction")
+  modelVersion        String   @map("model_version") @db.VarChar(128)
+  blockchainTx        String?  @map("blockchain_tx") @db.VarChar(128)
+  blockchainBlock     BigInt?  @map("blockchain_block")
+  blockchainNetwork   String?  @map("blockchain_network") @db.VarChar(64)
+  blockchainVerified  Boolean? @default(true) @map("blockchain_verified")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([imageHash], map: "idx_offchain_assessments_image_hash")
+  @@index([predictionHash], map: "idx_offchain_assessments_pred_hash")
+  @@map("offchain_assessments")
+}

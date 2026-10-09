@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Default Neon PostgreSQL connection string
 DEFAULT_DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://neondb_owner:npg_zW8oQAj7SBuK@ep-fancy-cell-ay3onbd2-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+    "postgresql://neondb_owner:npg_RcaSUpke37Mi@ep-mute-wave-axp0uhye-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 )
 
 # Local fallback SQLite path
@@ -80,7 +80,7 @@ class DatabaseManager:
             try:
                 with self._pg_conn.cursor() as cur:
                     cur.execute("""
-                        CREATE TABLE IF NOT EXISTS assessments (
+                        CREATE TABLE IF NOT EXISTS offchain_assessments (
                             record_id VARCHAR(64) PRIMARY KEY,
                             vehicle_id VARCHAR(64),
                             image_hash VARCHAR(64) NOT NULL,
@@ -94,14 +94,15 @@ class DatabaseManager:
                             blockchain_verified BOOLEAN DEFAULT TRUE,
                             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                         );
-                        CREATE INDEX IF NOT EXISTS idx_assessments_image_hash ON assessments(image_hash);
-                        CREATE INDEX IF NOT EXISTS idx_assessments_pred_hash ON assessments(prediction_hash);
+                        CREATE INDEX IF NOT EXISTS idx_offchain_assessments_image_hash ON offchain_assessments(image_hash);
+                        CREATE INDEX IF NOT EXISTS idx_offchain_assessments_pred_hash ON offchain_assessments(prediction_hash);
                     """)
-                logger.info("Neon PostgreSQL tables initialized successfully")
+                logger.info("Neon PostgreSQL offchain tables initialized successfully")
                 return
             except Exception as e:
-                logger.warning("Failed to initialize Neon PostgreSQL tables: %s. Switching to SQLite fallback.", e)
-                self._driver_type = "sqlite"
+                logger.warning("Failed to initialize Neon PostgreSQL tables: %s.", e)
+                # Ensure connection remains active even if schema creation encountered non-fatal error
+                pass
 
         # SQLite Fallback initialization
         try:
@@ -159,7 +160,7 @@ class DatabaseManager:
                 with self._pg_conn.cursor() as cur:
                     pred_json = json.dumps(canonical_pred)
                     cur.execute("""
-                        INSERT INTO assessments (
+                        INSERT INTO offchain_assessments (
                             record_id, vehicle_id, image_hash, image_storage_uri,
                             prediction_hash, canonical_prediction, model_version,
                             blockchain_tx, blockchain_block, blockchain_network,
@@ -213,7 +214,7 @@ class DatabaseManager:
                                prediction_hash, canonical_prediction, model_version,
                                blockchain_tx, blockchain_block, blockchain_network,
                                blockchain_verified, created_at
-                        FROM assessments WHERE record_id = %s
+                        FROM offchain_assessments WHERE record_id = %s
                     """, (record_id,))
                     row = cur.fetchone()
                     if row:
@@ -246,7 +247,7 @@ class DatabaseManager:
                                prediction_hash, canonical_prediction, model_version,
                                blockchain_tx, blockchain_block, blockchain_network,
                                blockchain_verified, created_at
-                        FROM assessments ORDER BY created_at DESC LIMIT %s
+                        FROM offchain_assessments ORDER BY created_at DESC LIMIT %s
                     """, (limit,))
                     rows = cur.fetchall()
                     for r in rows:
