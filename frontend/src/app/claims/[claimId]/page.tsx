@@ -38,6 +38,7 @@ import { AGENT_ORDER, ETHERSCAN_BASE_URL } from "@/lib/constants";
 import { cn, formatDate } from "@/lib/utils";
 import { Copyable } from "@/components/ui/copyable";
 import {
+  SatelliteAgentCard,
   ImageAgentCard,
   SensorAgentCard,
   TextAgentCard,
@@ -807,13 +808,17 @@ export default function ClaimDetailPage() {
               <span className="h-px flex-1 bg-gradient-to-r from-transparent via-cyan-700/50 to-transparent" />
             </div>
             <div className="space-y-4">
+              <SatelliteAgentCard
+                report={claim.agent_reports?.SatelliteAgent}
+                order={1}
+              />
               <ImageAgentCard
                 report={claim.agent_reports?.ImageAgent}
-                order={1}
+                order={2}
               />
               <SensorAgentCard
                 report={claim.agent_reports?.SensorAgent}
-                order={2}
+                order={3}
                 userTelemetry={
                   (claim.data?.sensor_data ||
                     claim.data?.sensor ||
@@ -822,19 +827,19 @@ export default function ClaimDetailPage() {
               />
               <TextAgentCard
                 report={claim.agent_reports?.TextAgent}
-                order={3}
+                order={4}
               />
               <CrossModalAgentCard
                 report={claim.agent_reports?.CrossModalAgent}
-                order={4}
+                order={5}
               />
               <RiskEngineCard
                 report={claim.agent_reports?.RiskEngine}
-                order={5}
+                order={6}
               />
               <AdversarialVerifierCard
                 report={claim.agent_reports?.AdversarialVerifier}
-                order={6}
+                order={7}
               />
               <ExplanationAgentCard
                 report={claim.agent_reports?.ExplanationAgent}

@@ -1,5 +1,10 @@
+// AI service (Python/FastAPI) - port 8000
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+
+// Node/Fastify backend with Neon DB - port 4000
+export const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:4000";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_DESCRIPTION_LENGTH = 10000;

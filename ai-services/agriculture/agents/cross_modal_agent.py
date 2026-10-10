@@ -1,7 +1,10 @@
 """
-TruthChain Agriculture - Cross-Modal Agent
+TruthChain Agriculture - Cross-Modal Agent (LLM-Powered)
 
 Cross-modal consistency layer for agriculture claims.
+
+Uses Groq LLM (openai/gpt-oss-120b) for semantic multi-evidence fusion,
+exactly mirroring the motor pipeline's CrossModalAgent architecture.
 
 This agent compares evidence produced by:
     - ImageAgent
@@ -12,13 +15,11 @@ This agent compares evidence produced by:
 It does NOT independently determine insurance fraud.
 
 Its purpose is to:
-    1. Normalize crop names across modalities.
-    2. Compare claimed crop vs image/satellite crop evidence.
-    3. Compare claimed damage event vs sensor evidence.
-    4. Compare narrative loss vs available evidence.
-    5. Detect explicit contradictions.
-    6. Measure cross-modal agreement.
-    7. Produce a structured result for downstream investigation/risk/consensus.
+    1. Normalize crop names across modalities using deterministic pre-processing.
+    2. Feed all agent evidence to Groq LLM for semantic cross-modal reasoning.
+    3. Detect contradictions via LLM reasoning (not just dict lookup).
+    4. Measure cross-modal agreement with LLM explanation.
+    5. Produce a structured result for downstream investigation/risk/consensus.
 
 Important:
     risk_score is a cross-modal inconsistency score.
@@ -40,34 +41,28 @@ Standardized agent contract:
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Set
 
+import config  # noqa: F401
+from groq import Groq
 
-MODEL_VERSION = "agriculture-cross-modal-agent-v0.1"
+
+MODEL_VERSION = "agriculture-cross-modal-agent-llm-v1.0"
 DOMAIN = "agriculture"
 AGENT_NAME = "CrossModalAgent"
 
+GROQ_MODEL = "openai/gpt-oss-120b"
+REASONING_EFFORT = "low"
+MAX_COMPLETION_TOKENS = 1800
+
 
 # ---------------------------------------------------------------------------
-# Crop taxonomy normalization
+# Crop taxonomy normalization (deterministic pre-processing)
 # ---------------------------------------------------------------------------
-#
-# CrossModal owns the broad normalization layer.
-#
-# This is important because different models may use labels such as:
-#   "Maize"
-#   "Maize (Corn) plant"
-#   "Corn"
-#
-# and:
-#   "Mustard"
-#   "Rapeseed (Canola) plant"
-#   "Canola"
-#
-# Those should not automatically be treated as contradictions.
-#
 
 CROP_GROUPS = {
     "wheat": "Wheat",
@@ -143,7 +138,7 @@ CROP_GROUPS = {
 
 
 # ---------------------------------------------------------------------------
-# Event normalization
+# Event normalization (deterministic pre-processing)
 # ---------------------------------------------------------------------------
 
 EVENT_GROUPS = {
@@ -190,34 +185,104 @@ EVENT_GROUPS = {
 
 
 # ---------------------------------------------------------------------------
-# Cross-modal agent
+# System prompt for Groq LLM cross-modal fusion
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """
+You are the cross-modal evidence fusion component of an agriculture insurance
+claim verification system.
+
+You receive structured outputs from multiple evidence agents:
+  - TextAgent: extracted crop, event, area, loss% from claim narrative
+  - ImageAgent: crop classification from field photo (CNN model)
+  - SatelliteAgent: crop classification from Sentinel-2 imagery (CropAgent v0.2, NDVI)
+  - SensorAgent: weather/soil sensor analysis (rainfall, temperature, soil moisture)
+
+Your task is to:
+1. Detect semantic agreements and contradictions across all evidence modalities.
+2. Explain each contradiction clearly with specific field values.
+3. Assess cross-modal consistency as a numerical score.
+4. Output a structured JSON analysis.
+
+Do NOT:
+- Determine final fraud or claim validity
+- Invent information not present in the inputs
+- Estimate loss amounts
+
+Return ONLY valid JSON with exactly these fields:
+
+{
+  "cross_modal_score": number (0.0-1.0, where 0=perfect agreement, 1=maximum inconsistency),
+  "agreement_level": "HIGH" | "MODERATE" | "LOW" | "CONTRADICTORY",
+  "decision": "PASS" | "SUSPICIOUS" | "INSUFFICIENT_DATA",
+  "crop_consistency": {
+    "status": "CONSISTENT" | "INCONSISTENT" | "UNAVAILABLE",
+    "claimed": string or null,
+    "image_detected": string or null,
+    "satellite_detected": string or null,
+    "explanation": string
+  },
+  "event_consistency": {
+    "status": "CONSISTENT" | "INCONSISTENT" | "UNAVAILABLE",
+    "claimed": string or null,
+    "sensor_evidence": string or null,
+    "explanation": string
+  },
+  "satellite_ndvi_analysis": {
+    "ndvi_value": number or null,
+    "ndvi_interpretation": string,
+    "supports_damage_claim": boolean or null
+  },
+  "contradictions": [string],
+  "supporting_evidence": [string],
+  "llm_reasoning": string
+}
+
+Decision rules:
+- PASS: No contradictions found, modalities agree or have no conflicting evidence
+- SUSPICIOUS: One or more clear contradictions detected between modalities
+- INSUFFICIENT_DATA: Too few modalities available to make a determination
+
+cross_modal_score: 0.0-0.3 = low inconsistency, 0.3-0.6 = moderate, 0.6-1.0 = high inconsistency
+"""
+
+
+# ---------------------------------------------------------------------------
+# Cross-Modal Agent (LLM-Powered)
 # ---------------------------------------------------------------------------
 
 class CrossModalAgent:
     """
-    Agriculture cross-modal consistency engine.
+    LLM-powered agriculture cross-modal consistency engine.
 
-    Expected inputs are already-produced agent dictionaries.
+    Uses Groq LLM (openai/gpt-oss-120b) for semantic multi-evidence fusion.
 
-    Example:
+    Deterministic pre-processing normalizes crop and event names.
+    The LLM then reasons over the normalized evidence to detect
+    contradictions and produce a structured cross-modal assessment.
 
-        image_result = ImageAgent.analyze(...)
-        satellite_result = SatelliteAgent.analyze(...)
-        text_result = TextAgent.analyze(...)
-        sensor_result = SensorAgent.analyze(...)
-
-        result = CrossModalAgent().analyze(
-            text_result=text_result,
-            image_result=image_result,
-            satellite_result=satellite_result,
-            sensor_result=sensor_result,
-        )
+    This matches the motor pipeline's CrossModalAgent architecture.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        client: Optional[Groq] = None,
+        model: str = GROQ_MODEL,
+    ) -> None:
         self.model_version = MODEL_VERSION
         self.domain = DOMAIN
         self.agent_name = AGENT_NAME
+        self.model = model
+
+        if client is not None:
+            self.client = client
+        elif os.getenv("GROQ_API_KEY"):
+            try:
+                self.client = Groq()
+            except Exception:
+                self.client = None
+        else:
+            self.client = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -232,7 +297,7 @@ class CrossModalAgent:
         claim: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Compare agriculture evidence across available modalities.
+        Compare agriculture evidence across modalities using Groq LLM.
 
         Parameters
         ----------
@@ -249,9 +314,7 @@ class CrossModalAgent:
             Output from SensorAgent.
 
         claim:
-            Optional structured claim fields. This can provide fallback
-            information such as crop, claimed event, loss percentage,
-            event date, and location.
+            Optional structured claim fields as fallback context.
 
         Returns
         -------
@@ -268,10 +331,6 @@ class CrossModalAgent:
             sensor_result = sensor_result or {}
             claim = claim or {}
 
-            evidence: List[str] = []
-            contradictions: List[str] = []
-            checks: List[Dict[str, Any]] = []
-
             available_modalities = self._available_modalities(
                 text_result,
                 image_result,
@@ -286,7 +345,7 @@ class CrossModalAgent:
                 )
 
             # ----------------------------------------------------------
-            # Claim extraction / normalization
+            # Deterministic pre-processing: normalize crop/event names
             # ----------------------------------------------------------
 
             claimed_crop = self._resolve_claimed_crop(
@@ -320,150 +379,66 @@ class CrossModalAgent:
             )
 
             # ----------------------------------------------------------
-            # Crop consistency
+            # Build evidence context for LLM
             # ----------------------------------------------------------
 
-            crop_check = self._check_crop_consistency(
-                claimed_crop=claimed_crop,
-                image_result=image_result,
-                satellite_result=satellite_result,
-            )
-
-            if crop_check["status"] != "UNAVAILABLE":
-                checks.append(crop_check)
-
-                if crop_check["status"] == "PASS":
-                    evidence.extend(crop_check["evidence"])
-
-                elif crop_check["status"] == "CONTRADICTION":
-                    contradictions.extend(crop_check["contradictions"])
-
-            # ----------------------------------------------------------
-            # Event consistency
-            # ----------------------------------------------------------
-
-            event_check = self._check_event_consistency(
-                claimed_event=claimed_event,
-                sensor_result=sensor_result,
+            evidence_context = self._build_evidence_context(
                 text_result=text_result,
-            )
-
-            if event_check["status"] != "UNAVAILABLE":
-                checks.append(event_check)
-
-                if event_check["status"] == "PASS":
-                    evidence.extend(event_check["evidence"])
-
-                elif event_check["status"] == "CONTRADICTION":
-                    contradictions.extend(event_check["contradictions"])
-
-            # ----------------------------------------------------------
-            # Loss consistency
-            # ----------------------------------------------------------
-
-            loss_check = self._check_loss_consistency(
-                claimed_loss=claimed_loss,
                 image_result=image_result,
                 satellite_result=satellite_result,
                 sensor_result=sensor_result,
-            )
-
-            if loss_check["status"] != "UNAVAILABLE":
-                checks.append(loss_check)
-
-                if loss_check["status"] == "PASS":
-                    evidence.extend(loss_check["evidence"])
-
-                elif loss_check["status"] == "CONTRADICTION":
-                    contradictions.extend(loss_check["contradictions"])
-
-            # ----------------------------------------------------------
-            # Date / location consistency
-            # ----------------------------------------------------------
-
-            context_check = self._check_context_consistency(
+                claimed_crop=claimed_crop,
+                claimed_event=claimed_event,
+                claimed_loss=claimed_loss,
                 event_date=event_date,
                 location=location,
-                text_result=text_result,
-                sensor_result=sensor_result,
-                satellite_result=satellite_result,
-            )
-
-            if context_check["status"] != "UNAVAILABLE":
-                checks.append(context_check)
-
-                if context_check["status"] == "PASS":
-                    evidence.extend(context_check["evidence"])
-
-                elif context_check["status"] == "CONTRADICTION":
-                    contradictions.extend(context_check["contradictions"])
-
-            # ----------------------------------------------------------
-            # Modality-level decisions
-            # ----------------------------------------------------------
-
-            modality_check = self._check_modality_health(
-                text_result=text_result,
-                image_result=image_result,
-                satellite_result=satellite_result,
-                sensor_result=sensor_result,
-            )
-
-            if modality_check["status"] != "UNAVAILABLE":
-                checks.append(modality_check)
-
-                evidence.extend(modality_check["evidence"])
-                contradictions.extend(
-                    modality_check["contradictions"]
-                )
-
-            # ----------------------------------------------------------
-            # Agreement calculation
-            # ----------------------------------------------------------
-
-            agreement = self._calculate_agreement(
-                checks=checks,
-                available_modalities=available_modalities,
             )
 
             # ----------------------------------------------------------
-            # Final cross-modal decision
+            # LLM semantic fusion
             # ----------------------------------------------------------
 
-            contradiction_count = len(contradictions)
-            usable_check_count = sum(
-                1
-                for check in checks
-                if check["status"] != "UNAVAILABLE"
-            )
+            llm_result = self._llm_analyze(evidence_context)
 
-            if usable_check_count == 0:
+            # ----------------------------------------------------------
+            # Extract and validate LLM output
+            # ----------------------------------------------------------
+
+            cross_modal_score = float(
+                llm_result.get("cross_modal_score", 0.5)
+            )
+            cross_modal_score = max(0.0, min(1.0, cross_modal_score))
+
+            agreement_level = str(
+                llm_result.get("agreement_level", "MODERATE")
+            ).upper()
+
+            decision = str(
+                llm_result.get("decision", "INSUFFICIENT_DATA")
+            ).upper()
+
+            if decision not in {"PASS", "SUSPICIOUS", "INSUFFICIENT_DATA"}:
                 decision = "INSUFFICIENT_DATA"
 
-            elif contradiction_count > 0:
-                decision = "SUSPICIOUS"
+            contradictions: List[str] = [
+                str(c) for c in llm_result.get("contradictions", [])
+                if c and str(c).strip()
+            ]
 
-            elif agreement >= 0.60:
-                decision = "PASS"
+            supporting_evidence: List[str] = [
+                str(e) for e in llm_result.get("supporting_evidence", [])
+                if e and str(e).strip()
+            ]
 
-            else:
-                decision = "INSUFFICIENT_DATA"
+            llm_reasoning = str(
+                llm_result.get("llm_reasoning", "")
+            ).strip()
 
-            # Cross-modal confidence reflects agreement and evidence
-            # availability. It is deliberately not called fraud probability.
-            confidence = self._calculate_confidence(
-                agreement=agreement,
-                usable_check_count=usable_check_count,
-                modality_count=len(available_modalities),
-                contradiction_count=contradiction_count,
-            )
+            # ----------------------------------------------------------
+            # Build evidence list
+            # ----------------------------------------------------------
 
-            # Inconsistency score is distinct from final fraud risk.
-            risk_score = self._calculate_risk_score(
-                agreement=agreement,
-                contradiction_count=contradiction_count,
-                usable_check_count=usable_check_count,
-            )
+            evidence: List[str] = []
 
             if claimed_crop:
                 evidence.append(
@@ -491,15 +466,52 @@ class CrossModalAgent:
                     f"Claim location/context: '{location}'."
                 )
 
-            evidence.append(
-                "Cross-modal agreement score: "
-                f"{agreement:.3f}."
-            )
+            evidence.extend(supporting_evidence)
 
             evidence.append(
-                "Cross-modal evidence modalities available: "
+                f"Cross-modal LLM agreement level: {agreement_level}. "
+                f"Inconsistency score: {cross_modal_score:.3f}."
+            )
+
+            if llm_reasoning:
+                evidence.append(
+                    f"LLM reasoning: {llm_reasoning}"
+                )
+
+            evidence.append(
+                f"Evidence modalities available: "
                 + ", ".join(available_modalities)
-                + "."
+                + f" ({len(available_modalities)})."
+            )
+
+            # ----------------------------------------------------------
+            # Satellite NDVI info
+            # ----------------------------------------------------------
+
+            ndvi_analysis = llm_result.get("satellite_ndvi_analysis", {})
+            ndvi_value = None
+            if isinstance(ndvi_analysis, dict):
+                ndvi_raw = ndvi_analysis.get("ndvi_value")
+                if ndvi_raw is not None:
+                    try:
+                        ndvi_value = float(ndvi_raw)
+                    except (TypeError, ValueError):
+                        ndvi_value = None
+
+                ndvi_interp = ndvi_analysis.get("ndvi_interpretation", "")
+                if ndvi_interp:
+                    evidence.append(
+                        f"Satellite NDVI analysis: {ndvi_interp}"
+                    )
+
+            # ----------------------------------------------------------
+            # Confidence
+            # ----------------------------------------------------------
+
+            confidence = self._calculate_confidence(
+                cross_modal_score=cross_modal_score,
+                modality_count=len(available_modalities),
+                contradiction_count=len(contradictions),
             )
 
             processing_time_ms = round(
@@ -511,28 +523,35 @@ class CrossModalAgent:
                 "agent": self.agent_name,
                 "domain": self.domain,
                 "confidence": round(confidence, 6),
-                "risk_score": round(risk_score, 6),
+                "risk_score": round(cross_modal_score, 6),
                 "decision": decision,
                 "evidence": evidence,
                 "contradictions": contradictions,
                 "model_version": self.model_version,
                 "processing_time_ms": processing_time_ms,
 
-                # Normalized claim information.
+                # Agriculture cross-modal specific fields.
                 "claimed_crop": claimed_crop,
                 "claimed_event": claimed_event,
                 "claimed_loss_percent": claimed_loss,
                 "event_date": event_date,
                 "location": location,
-
-                # Cross-modal analysis.
-                "agreement_score": round(agreement, 6),
-                "cross_modal_checks": checks,
+                "agreement_level": agreement_level,
+                "cross_modal_score": round(cross_modal_score, 6),
+                "agreement_score": round(1.0 - cross_modal_score, 6),
+                "contradiction_count": len(contradictions),
                 "available_modalities": available_modalities,
-                "contradiction_count": contradiction_count,
+                "ndvi_value": ndvi_value,
+                "crop_consistency": llm_result.get("crop_consistency", {}),
+                "event_consistency": llm_result.get("event_consistency", {}),
+                "llm_reasoning": llm_reasoning,
 
-                # Explicit semantic clarification.
-                "risk_score_meaning": "cross_modal_inconsistency_score",
+                # LLM audit information.
+                "llm_provider": "groq",
+                "llm_model": self.model,
+
+                # Semantic clarification.
+                "risk_score_meaning": "cross_modal_inconsistency",
                 "agent_version": MODEL_VERSION,
             }
 
@@ -543,7 +562,185 @@ class CrossModalAgent:
             )
 
     # ------------------------------------------------------------------
-    # Claim resolution
+    # Evidence context builder
+    # ------------------------------------------------------------------
+
+    def _build_evidence_context(
+        self,
+        text_result: Dict[str, Any],
+        image_result: Dict[str, Any],
+        satellite_result: Dict[str, Any],
+        sensor_result: Dict[str, Any],
+        claimed_crop: Optional[str],
+        claimed_event: Optional[str],
+        claimed_loss: Optional[float],
+        event_date: Optional[str],
+        location: Optional[str],
+    ) -> str:
+        """Build a structured evidence context string for the LLM."""
+
+        lines = []
+
+        lines.append("=== CLAIM SUMMARY (normalized) ===")
+        lines.append(f"Claimed crop: {claimed_crop or 'not specified'}")
+        lines.append(f"Claimed event: {claimed_event or 'not specified'}")
+        lines.append(f"Claimed loss: {f'{claimed_loss:.1f}%' if claimed_loss is not None else 'not specified'}")
+        lines.append(f"Event date: {event_date or 'not specified'}")
+        lines.append(f"Location: {location or 'not specified'}")
+
+        lines.append("\n=== TEXT AGENT OUTPUT ===")
+        if text_result:
+            lines.append(f"Decision: {text_result.get('decision', 'N/A')}")
+            lines.append(f"Extracted crop: {text_result.get('extracted_crop', 'N/A')}")
+            lines.append(f"Damage types: {text_result.get('damage_types', [])}")
+            lines.append(f"Confidence: {text_result.get('confidence', 0):.3f}")
+            ev = text_result.get('evidence', [])
+            if ev:
+                lines.append(f"Key evidence: {'; '.join(ev[:3])}")
+        else:
+            lines.append("Not available.")
+
+        lines.append("\n=== IMAGE AGENT OUTPUT (Crop CNN) ===")
+        if image_result and image_result.get('decision') not in ('INSUFFICIENT_DATA', None, ''):
+            lines.append(f"Decision: {image_result.get('decision', 'N/A')}")
+            lines.append(f"Crop classification: {image_result.get('crop_classification', image_result.get('predicted_crop', 'N/A'))}")
+            lines.append(f"Damage level: {image_result.get('damage_level', 'N/A')}")
+            lines.append(f"Confidence: {image_result.get('confidence', 0):.3f}")
+            ev = image_result.get('evidence', [])
+            if ev:
+                lines.append(f"Key evidence: {'; '.join(str(e) for e in ev[:3])}")
+        else:
+            lines.append("Not available or insufficient data.")
+
+        lines.append("\n=== SATELLITE AGENT OUTPUT (Sentinel-2 / CropAgent v0.2) ===")
+        if satellite_result and satellite_result.get('decision') not in ('INSUFFICIENT_DATA', None, ''):
+            lines.append(f"Decision: {satellite_result.get('decision', 'N/A')}")
+            lines.append(f"Predicted crop: {satellite_result.get('predicted_crop', 'N/A')}")
+            lines.append(f"NDVI: {satellite_result.get('ndvi', satellite_result.get('ndvi_mean', 'N/A'))}")
+            lines.append(f"Evidence decision: {satellite_result.get('evidence_decision', 'N/A')}")
+            lines.append(f"Confidence: {satellite_result.get('confidence', 0):.3f}")
+            ev = satellite_result.get('evidence', [])
+            if ev:
+                lines.append(f"Key evidence: {'; '.join(str(e) for e in ev[:3])}")
+        else:
+            lines.append("Not available or insufficient data.")
+
+        lines.append("\n=== SENSOR AGENT OUTPUT (Weather/Soil) ===")
+        if sensor_result and sensor_result.get('decision') not in ('INSUFFICIENT_DATA', None, ''):
+            lines.append(f"Decision: {sensor_result.get('decision', 'N/A')}")
+            lines.append(f"Detected events: {sensor_result.get('detected_events', [])}")
+            lines.append(f"Evidence decision: {sensor_result.get('evidence_decision', 'N/A')}")
+            lines.append(f"Confidence: {sensor_result.get('confidence', 0):.3f}")
+            obs = sensor_result.get('observations', {})
+            if obs:
+                obs_str = ", ".join(
+                    f"{k}={v}" for k, v in list(obs.items())[:6]
+                )
+                lines.append(f"Observations: {obs_str}")
+            ev = sensor_result.get('evidence', [])
+            if ev:
+                lines.append(f"Key evidence: {'; '.join(str(e) for e in ev[:3])}")
+        else:
+            lines.append("Not available or insufficient data.")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # LLM analysis
+    # ------------------------------------------------------------------
+
+    def _llm_analyze(
+        self,
+        evidence_context: str,
+    ) -> Dict[str, Any]:
+        """
+        Use Groq LLM to perform semantic cross-modal fusion.
+        Falls back to deterministic analysis if LLM is unavailable.
+        """
+
+        if self.client is None:
+            return self._deterministic_fallback(evidence_context)
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Analyze the cross-modal consistency of this "
+                            "agriculture claim evidence:\n\n"
+                            f"{evidence_context}"
+                        ),
+                    },
+                ],
+                temperature=0,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+
+            if not content:
+                raise RuntimeError(
+                    "Groq returned an empty cross-modal response."
+                )
+
+            parsed = json.loads(content)
+
+            if not isinstance(parsed, dict):
+                raise RuntimeError(
+                    "Groq cross-modal response must be a JSON object."
+                )
+
+            return parsed
+
+        except Exception:
+            return self._deterministic_fallback(evidence_context)
+
+    def _deterministic_fallback(
+        self,
+        evidence_context: str,
+    ) -> Dict[str, Any]:
+        """Deterministic fallback when Groq LLM is unavailable."""
+
+        has_data = "Not available" not in evidence_context
+
+        return {
+            "cross_modal_score": 0.5,
+            "agreement_level": "MODERATE",
+            "decision": "INSUFFICIENT_DATA" if not has_data else "PASS",
+            "crop_consistency": {
+                "status": "UNAVAILABLE",
+                "claimed": None,
+                "image_detected": None,
+                "satellite_detected": None,
+                "explanation": "LLM unavailable — deterministic fallback."
+            },
+            "event_consistency": {
+                "status": "UNAVAILABLE",
+                "claimed": None,
+                "sensor_evidence": None,
+                "explanation": "LLM unavailable — deterministic fallback."
+            },
+            "satellite_ndvi_analysis": {
+                "ndvi_value": None,
+                "ndvi_interpretation": "LLM unavailable.",
+                "supports_damage_claim": None,
+            },
+            "contradictions": [],
+            "supporting_evidence": [
+                "LLM cross-modal fusion unavailable. Deterministic fallback used."
+            ],
+            "llm_reasoning": "Groq LLM client not available. Using deterministic fallback.",
+        }
+
+    # ------------------------------------------------------------------
+    # Claim field resolvers (deterministic pre-processing)
     # ------------------------------------------------------------------
 
     def _resolve_claimed_crop(
@@ -553,19 +750,14 @@ class CrossModalAgent:
         image_result: Dict[str, Any],
         satellite_result: Dict[str, Any],
     ) -> Optional[str]:
+        """Resolve normalized claimed crop from all sources."""
 
-        candidates = [
+        for value in [
             claim.get("crop"),
             claim.get("claimed_crop"),
             text_result.get("extracted_crop"),
-            text_result.get("claimed_crop"),
-            image_result.get("claimed_crop"),
-            satellite_result.get("claimed_crop"),
-        ]
-
-        for value in candidates:
+        ]:
             normalized = self._normalize_crop(value)
-
             if normalized:
                 return normalized
 
@@ -577,27 +769,19 @@ class CrossModalAgent:
         text_result: Dict[str, Any],
         sensor_result: Dict[str, Any],
     ) -> Optional[str]:
+        """Resolve normalized claimed event from all sources."""
 
-        candidates = [
+        for value in [
             claim.get("event"),
-            claim.get("claimed_event"),
             claim.get("damage_type"),
-            text_result.get("claimed_event"),
-            sensor_result.get("claimed_event"),
-        ]
-
-        # TextAgent currently exposes damage_types rather than
-        # claimed_event, so use the first narrative event if needed.
-        damage_types = text_result.get("damage_types")
-
-        if isinstance(damage_types, list) and damage_types:
-            candidates.append(damage_types[0])
-
-        for value in candidates:
+        ]:
             normalized = self._normalize_event(value)
-
             if normalized:
                 return normalized
+
+        damage_types = text_result.get("damage_types", [])
+        if isinstance(damage_types, list) and damage_types:
+            return damage_types[0]
 
         return None
 
@@ -606,649 +790,108 @@ class CrossModalAgent:
         claim: Dict[str, Any],
         text_result: Dict[str, Any],
     ) -> Optional[float]:
+        """Resolve claimed loss percentage."""
 
-        candidates = [
+        for value in [
             claim.get("claimed_loss_percent"),
-            claim.get("loss_percent"),
             text_result.get("claimed_loss_percent"),
-        ]
-
-        for value in candidates:
-            if value is None:
-                continue
-
-            try:
-                value = float(value)
-            except (TypeError, ValueError):
-                continue
-
-            if 0.0 <= value <= 100.0:
-                return value
+        ]:
+            if value is not None:
+                try:
+                    f = float(value)
+                    if 0 <= f <= 100:
+                        return f
+                except (TypeError, ValueError):
+                    pass
 
         return None
 
-    @staticmethod
-    def _resolve_value(*values: Any) -> Optional[Any]:
+    def _resolve_value(
+        self,
+        *values: Any,
+    ) -> Optional[str]:
+        """Return the first non-empty string value."""
 
         for value in values:
-            if value is None:
-                continue
-
-            if isinstance(value, str) and not value.strip():
-                continue
-
-            return value
+            if value is not None:
+                s = str(value).strip()
+                if s:
+                    return s
 
         return None
-
-    # ------------------------------------------------------------------
-    # Crop normalization
-    # ------------------------------------------------------------------
 
     def _normalize_crop(
         self,
         value: Any,
     ) -> Optional[str]:
+        """Normalize crop name using CROP_GROUPS lookup."""
 
         if value is None:
             return None
 
-        text = str(value).strip()
-
-        if not text:
+        value = str(value).strip()
+        if not value:
             return None
 
-        normalized = re.sub(
-            r"\s+",
-            " ",
-            text.lower(),
-        )
+        normalized = value.lower()
 
-        normalized = normalized.strip(" .-_")
-
-        # Direct alias.
         if normalized in CROP_GROUPS:
             return CROP_GROUPS[normalized]
 
-        # Remove common model suffix.
-        without_plant = re.sub(
-            r"\s+plant$",
-            "",
-            normalized,
-        ).strip()
+        for canonical in set(CROP_GROUPS.values()):
+            if normalized == canonical.lower():
+                return canonical
 
-        if without_plant in CROP_GROUPS:
-            return CROP_GROUPS[without_plant]
-
-        # Fallback substring handling for labels such as:
-        # "Maize (Corn) plant".
-        if "maize" in normalized or "corn" in normalized:
-            return "Maize"
-
-        if (
-            "rapeseed" in normalized
-            or "canola" in normalized
-            or "mustard" in normalized
-        ):
-            return "Mustard"
-
-        if "sugarcane" in normalized or "sugar cane" in normalized:
-            return "Sugarcane"
-
-        if "wheat" in normalized:
-            return "Wheat"
-
-        if "rice" in normalized or "paddy" in normalized:
-            return "Rice"
-
-        if "lentil" in normalized or "masoor" in normalized:
-            return "Lentil"
-
-        if "potato" in normalized:
-            return "Potato"
-
-        if "garlic" in normalized:
-            return "Garlic"
-
-        if "coriander" in normalized:
-            return "Coriander"
-
-        if "chickpea" in normalized or "chick pea" in normalized:
-            return "Gram"
-
-        if "gram" in normalized:
-            return "Gram"
-
-        if "pea" in normalized:
-            return "Green pea"
-
-        if "bersem" in normalized or "berseem" in normalized:
-            return "Bersem"
-
-        return text
-
-    # ------------------------------------------------------------------
-    # Event normalization
-    # ------------------------------------------------------------------
+        return value
 
     def _normalize_event(
         self,
         value: Any,
     ) -> Optional[str]:
+        """Normalize event name using EVENT_GROUPS lookup."""
 
         if value is None:
             return None
 
-        text = str(value).strip().lower()
-
-        if not text:
+        value = str(value).strip()
+        if not value:
             return None
 
-        text = re.sub(r"\s+", " ", text)
+        normalized = value.lower()
 
-        if text in EVENT_GROUPS:
-            return EVENT_GROUPS[text]
+        if normalized in EVENT_GROUPS:
+            return EVENT_GROUPS[normalized]
 
-        # Handle simple embedded phrases.
-        if "heavy rain" in text or "heavy rainfall" in text:
-            return "Heavy rain"
-
-        if "excess rain" in text or "excess rainfall" in text:
-            return "Excess rainfall"
-
-        if "flood" in text:
-            return "Flood"
-
-        if "waterlog" in text:
-            return "Waterlogging"
-
-        if "drought" in text:
-            return "Drought"
-
-        if "cyclone" in text or "storm" in text:
-            return "Storm"
-
-        if "hail" in text:
-            return "Hail"
-
-        if "pest" in text or "insect" in text:
-            return "Pest"
-
-        if "disease" in text:
-            return "Disease"
-
-        if "fire" in text:
-            return "Fire"
-
-        if "heat wave" in text or "heatwave" in text:
-            return "Heatwave"
-
-        if "frost" in text:
-            return "Frost"
-
-        return str(value).strip()
+        return value
 
     # ------------------------------------------------------------------
-    # Crop consistency
+    # Available modalities
     # ------------------------------------------------------------------
 
-    def _check_crop_consistency(
-        self,
-        claimed_crop: Optional[str],
-        image_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-    ) -> Dict[str, Any]:
-
-        if not claimed_crop:
-            return self._unavailable_check(
-                "crop_consistency"
-            )
-
-        observations = []
-
-        image_crop = self._normalize_crop(
-            image_result.get("predicted_crop")
-        )
-
-        satellite_crop = self._normalize_crop(
-            satellite_result.get("predicted_crop")
-        )
-
-        if image_crop:
-            observations.append(
-                ("ImageAgent", image_crop)
-            )
-
-        if satellite_crop:
-            observations.append(
-                ("SatelliteAgent", satellite_crop)
-            )
-
-        if not observations:
-            return self._unavailable_check(
-                "crop_consistency"
-            )
-
-        evidence = []
-        contradictions = []
-
-        for agent_name, predicted_crop in observations:
-            if predicted_crop == claimed_crop:
-                evidence.append(
-                    f"{agent_name} crop evidence matches claimed "
-                    f"crop '{claimed_crop}'."
-                )
-            else:
-                contradictions.append(
-                    f"{agent_name} predicted crop '{predicted_crop}', "
-                    f"which differs from claimed crop '{claimed_crop}'."
-                )
-
-        if contradictions:
-            return {
-                "name": "crop_consistency",
-                "status": "CONTRADICTION",
-                "score": 0.0,
-                "evidence": evidence,
-                "contradictions": contradictions,
-            }
-
-        return {
-            "name": "crop_consistency",
-            "status": "PASS",
-            "score": 1.0,
-            "evidence": evidence,
-            "contradictions": [],
-        }
-
-    # ------------------------------------------------------------------
-    # Event consistency
-    # ------------------------------------------------------------------
-
-    def _check_event_consistency(
-        self,
-        claimed_event: Optional[str],
-        sensor_result: Dict[str, Any],
-        text_result: Dict[str, Any],
-    ) -> Dict[str, Any]:
-
-        if not claimed_event:
-            return self._unavailable_check(
-                "event_consistency"
-            )
-
-        evidence = []
-        contradictions = []
-
-        detected_events: Set[str] = set()
-
-        sensor_events = sensor_result.get("detected_events", [])
-
-        if isinstance(sensor_events, list):
-            for event in sensor_events:
-                normalized = self._normalize_event(event)
-
-                if normalized:
-                    detected_events.add(normalized)
-
-        text_events = text_result.get("damage_types", [])
-
-        if isinstance(text_events, list):
-            for event in text_events:
-                normalized = self._normalize_event(event)
-
-                if normalized:
-                    detected_events.add(normalized)
-
-        if not detected_events:
-            return self._unavailable_check(
-                "event_consistency"
-            )
-
-        matches = self._event_matches(
-            claimed_event,
-            detected_events,
-        )
-
-        if matches:
-            evidence.append(
-                f"Environmental/narrative evidence supports claimed "
-                f"event '{claimed_event}' through: "
-                + ", ".join(sorted(matches))
-                + "."
-            )
-
-            return {
-                "name": "event_consistency",
-                "status": "PASS",
-                "score": 1.0,
-                "evidence": evidence,
-                "contradictions": [],
-            }
-
-        contradictions.append(
-            f"Claimed event '{claimed_event}' is not supported by "
-            f"available event evidence: "
-            + ", ".join(sorted(detected_events))
-            + "."
-        )
-
-        return {
-            "name": "event_consistency",
-            "status": "CONTRADICTION",
-            "score": 0.0,
-            "evidence": [],
-            "contradictions": contradictions,
-        }
-
-    def _event_matches(
-        self,
-        claimed_event: str,
-        detected_events: Set[str],
-    ) -> Set[str]:
-
-        matches: Set[str] = set()
-
-        if claimed_event in detected_events:
-            matches.add(claimed_event)
-
-        related = {
-            "Heavy rain": {
-                "Excess rainfall",
-                "Flood",
-            },
-            "Excess rainfall": {
-                "Heavy rain",
-                "Flood",
-            },
-            "Flood": {
-                "Excess rainfall",
-                "Waterlogging",
-                "Heavy rain",
-            },
-            "Waterlogging": {
-                "Flood",
-                "Excess rainfall",
-                "Heavy rain",
-            },
-            "Storm": {
-                "High wind",
-            },
-            "High wind": {
-                "Storm",
-            },
-        }
-
-        for event in related.get(claimed_event, set()):
-            if event in detected_events:
-                matches.add(event)
-
-        return matches
-
-    # ------------------------------------------------------------------
-    # Loss consistency
-    # ------------------------------------------------------------------
-
-    def _check_loss_consistency(
-        self,
-        claimed_loss: Optional[float],
-        image_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-        sensor_result: Dict[str, Any],
-    ) -> Dict[str, Any]:
-
-        if claimed_loss is None:
-            return self._unavailable_check(
-                "loss_consistency"
-            )
-
-        evidence = []
-        contradictions = []
-
-        # At this stage the ImageAgent/SatelliteAgent do not produce a
-        # validated crop-loss percentage. Therefore we must NOT invent
-        # one from their confidence scores.
-        #
-        # We only record whether environmental/image evidence exists.
-        supporting_modalities = []
-
-        if image_result.get("decision") not in {
-            None,
-            "",
-            "ERROR",
-        }:
-            supporting_modalities.append("ImageAgent")
-
-        if satellite_result.get("decision") not in {
-            None,
-            "",
-            "ERROR",
-        }:
-            supporting_modalities.append("SatelliteAgent")
-
-        if sensor_result.get("decision") not in {
-            None,
-            "",
-            "ERROR",
-        }:
-            supporting_modalities.append("SensorAgent")
-
-        if supporting_modalities:
-            evidence.append(
-                f"Claimed crop loss is {claimed_loss:.2f}%; "
-                f"available evidence modalities for contextual review: "
-                + ", ".join(supporting_modalities)
-                + "."
-            )
-
-            return {
-                "name": "loss_consistency",
-                "status": "PASS",
-                "score": 0.5,
-                "evidence": evidence,
-                "contradictions": contradictions,
-            }
-
-        return self._unavailable_check(
-            "loss_consistency"
-        )
-
-    # ------------------------------------------------------------------
-    # Date / location consistency
-    # ------------------------------------------------------------------
-
-    def _check_context_consistency(
-        self,
-        event_date: Optional[str],
-        location: Optional[str],
-        text_result: Dict[str, Any],
-        sensor_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-    ) -> Dict[str, Any]:
-
-        evidence = []
-        contradictions = []
-
-        if not event_date and not location:
-            return self._unavailable_check(
-                "context_consistency"
-            )
-
-        if event_date:
-            evidence.append(
-                f"Cross-modal claim event date is '{event_date}'."
-            )
-
-        if location:
-            evidence.append(
-                f"Cross-modal claim location/context is '{location}'."
-            )
-
-        # Satellite has a scene acquisition timestamp.
-        scene_datetime = satellite_result.get("scene_datetime")
-
-        if event_date and scene_datetime:
-            satellite_date = str(scene_datetime)[:10]
-
-            if satellite_date == str(event_date)[:10]:
-                evidence.append(
-                    "Satellite scene acquisition date matches the "
-                    "claim event date."
-                )
-            else:
-                contradictions.append(
-                    "Satellite scene acquisition date "
-                    f"'{satellite_date}' differs from claim event date "
-                    f"'{event_date}'."
-                )
-
-        # Sensor event date.
-        sensor_date = sensor_result.get("event_date")
-
-        if event_date and sensor_date:
-            if str(sensor_date)[:10] == str(event_date)[:10]:
-                evidence.append(
-                    "Sensor evidence date matches the claim event date."
-                )
-            else:
-                contradictions.append(
-                    f"Sensor evidence date '{sensor_date}' differs from "
-                    f"claim event date '{event_date}'."
-                )
-
-        if contradictions:
-            return {
-                "name": "context_consistency",
-                "status": "CONTRADICTION",
-                "score": 0.0,
-                "evidence": evidence,
-                "contradictions": contradictions,
-            }
-
-        return {
-            "name": "context_consistency",
-            "status": "PASS",
-            "score": 1.0,
-            "evidence": evidence,
-            "contradictions": [],
-        }
-
-    # ------------------------------------------------------------------
-    # Modality health
-    # ------------------------------------------------------------------
-
-    def _check_modality_health(
+    def _available_modalities(
         self,
         text_result: Dict[str, Any],
         image_result: Dict[str, Any],
         satellite_result: Dict[str, Any],
         sensor_result: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> List[str]:
+        """Return list of available (non-empty) evidence modalities."""
 
-        results = {
-            "TextAgent": text_result,
-            "ImageAgent": image_result,
-            "SatelliteAgent": satellite_result,
-            "SensorAgent": sensor_result,
-        }
+        available = []
 
-        evidence = []
-        contradictions = []
+        if text_result and text_result.get("decision") not in (None, ""):
+            available.append("TextAgent")
 
-        usable = 0
+        if image_result and image_result.get("decision") not in (None, ""):
+            available.append("ImageAgent")
 
-        for name, result in results.items():
-            if not result:
-                continue
+        if satellite_result and satellite_result.get("decision") not in (None, ""):
+            available.append("SatelliteAgent")
 
-            decision = result.get("decision")
+        if sensor_result and sensor_result.get("decision") not in (None, ""):
+            available.append("SensorAgent")
 
-            if decision == "ERROR":
-                contradictions.append(
-                    f"{name} returned an ERROR result."
-                )
-                continue
-
-            if decision:
-                usable += 1
-
-                evidence.append(
-                    f"{name} supplied usable evidence with decision "
-                    f"'{decision}'."
-                )
-
-        if usable == 0:
-            return self._unavailable_check(
-                "modality_health"
-            )
-
-        return {
-            "name": "modality_health",
-            "status": "PASS",
-            "score": min(1.0, usable / 4.0),
-            "evidence": evidence,
-            "contradictions": contradictions,
-        }
-
-    # ------------------------------------------------------------------
-    # Agreement
-    # ------------------------------------------------------------------
-
-    def _calculate_agreement(
-        self,
-        checks: List[Dict[str, Any]],
-        available_modalities: List[str],
-    ) -> float:
-
-        usable = [
-            check
-            for check in checks
-            if check.get("status") != "UNAVAILABLE"
-        ]
-
-        if not usable:
-            return 0.0
-
-        weighted_scores = []
-        weights = []
-
-        for check in usable:
-            status = check.get("status")
-
-            if status == "PASS":
-                score = float(
-                    check.get("score", 1.0)
-                )
-
-            elif status == "CONTRADICTION":
-                score = 0.0
-
-            else:
-                score = 0.5
-
-            # Crop/event consistency are more meaningful than modality
-            # health for cross-modal agreement.
-            if check["name"] in {
-                "crop_consistency",
-                "event_consistency",
-            }:
-                weight = 2.0
-            else:
-                weight = 1.0
-
-            weighted_scores.append(score * weight)
-            weights.append(weight)
-
-        if not weights:
-            return 0.0
-
-        return max(
-            0.0,
-            min(
-                1.0,
-                sum(weighted_scores) / sum(weights),
-            ),
-        )
+        return available
 
     # ------------------------------------------------------------------
     # Confidence
@@ -1256,115 +899,26 @@ class CrossModalAgent:
 
     def _calculate_confidence(
         self,
-        agreement: float,
-        usable_check_count: int,
+        cross_modal_score: float,
         modality_count: int,
         contradiction_count: int,
     ) -> float:
+        """Calculate confidence based on LLM-produced cross-modal score."""
 
-        coverage = min(
-            modality_count / 4.0,
-            1.0,
-        )
+        if modality_count == 0:
+            return 0.0
 
-        check_coverage = min(
-            usable_check_count / 5.0,
-            1.0,
-        )
-
-        contradiction_penalty = min(
-            contradiction_count * 0.20,
-            0.80,
-        )
+        modality_factor = min(modality_count / 4.0, 1.0)
+        consistency_factor = 1.0 - cross_modal_score
+        contradiction_penalty = min(0.30, contradiction_count * 0.08)
 
         confidence = (
-            0.55 * agreement
-            + 0.25 * coverage
-            + 0.20 * check_coverage
+            0.50 * modality_factor
+            + 0.40 * consistency_factor
             - contradiction_penalty
         )
 
-        return max(
-            0.0,
-            min(1.0, confidence),
-        )
-
-    # ------------------------------------------------------------------
-    # Risk / inconsistency
-    # ------------------------------------------------------------------
-
-    def _calculate_risk_score(
-        self,
-        agreement: float,
-        contradiction_count: int,
-        usable_check_count: int,
-    ) -> float:
-
-        if usable_check_count == 0:
-            return 1.0
-
-        contradiction_component = min(
-            contradiction_count / 3.0,
-            1.0,
-        )
-
-        disagreement_component = 1.0 - agreement
-
-        risk = (
-            0.65 * contradiction_component
-            + 0.35 * disagreement_component
-        )
-
-        return max(
-            0.0,
-            min(1.0, risk),
-        )
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _available_modalities(
-        text_result: Dict[str, Any],
-        image_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-        sensor_result: Dict[str, Any],
-    ) -> List[str]:
-
-        results = [
-            ("TextAgent", text_result),
-            ("ImageAgent", image_result),
-            ("SatelliteAgent", satellite_result),
-            ("SensorAgent", sensor_result),
-        ]
-
-        available = []
-
-        for name, result in results:
-            if not result:
-                continue
-
-            if result.get("decision") == "ERROR":
-                continue
-
-            if result:
-                available.append(name)
-
-        return available
-
-    @staticmethod
-    def _unavailable_check(
-        name: str,
-    ) -> Dict[str, Any]:
-
-        return {
-            "name": name,
-            "status": "UNAVAILABLE",
-            "score": 0.0,
-            "evidence": [],
-            "contradictions": [],
-        }
+        return max(0.0, min(1.0, confidence))
 
     # ------------------------------------------------------------------
     # Error result
@@ -1396,11 +950,18 @@ class CrossModalAgent:
             "claimed_loss_percent": None,
             "event_date": None,
             "location": None,
+            "agreement_level": "CONTRADICTORY",
+            "cross_modal_score": 1.0,
             "agreement_score": 0.0,
-            "cross_modal_checks": [],
-            "available_modalities": [],
             "contradiction_count": 1,
-            "risk_score_meaning": "cross_modal_inconsistency_score",
+            "available_modalities": [],
+            "ndvi_value": None,
+            "crop_consistency": {},
+            "event_consistency": {},
+            "llm_reasoning": "",
+            "llm_provider": "groq",
+            "llm_model": self.model,
+            "risk_score_meaning": "cross_modal_inconsistency",
             "agent_version": MODEL_VERSION,
         }
 
@@ -1419,161 +980,3 @@ def get_cross_modal_agent() -> CrossModalAgent:
         _cross_modal_agent = CrossModalAgent()
 
     return _cross_modal_agent
-
-
-def analyze_cross_modal(
-    text_result: Optional[Dict[str, Any]] = None,
-    image_result: Optional[Dict[str, Any]] = None,
-    satellite_result: Optional[Dict[str, Any]] = None,
-    sensor_result: Optional[Dict[str, Any]] = None,
-    claim: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-
-    return get_cross_modal_agent().analyze(
-        text_result=text_result,
-        image_result=image_result,
-        satellite_result=satellite_result,
-        sensor_result=sensor_result,
-        claim=claim,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Local test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import json
-
-    print("=" * 72)
-    print("TRUTHCHAIN AGRICULTURE CROSS-MODAL AGENT TEST")
-    print("=" * 72)
-
-    # --------------------------------------------------------------
-    # Simulated outputs from the already-tested agents.
-    #
-    # These are representative agent-contract results, not new model
-    # predictions.
-    # --------------------------------------------------------------
-
-    text_result = {
-        "agent": "TextAgent",
-        "domain": "agriculture",
-        "confidence": 1.0,
-        "risk_score": 0.0,
-        "decision": "PASS",
-        "evidence": [
-            "Claim narrative identifies crop as 'Wheat'.",
-            "Claimed crop loss is 65.00%.",
-        ],
-        "contradictions": [],
-        "model_version": "agriculture-text-agent-v0.1",
-        "processing_time_ms": 1.0,
-        "extracted_crop": "Wheat",
-        "claimed_loss_percent": 65.0,
-        "event_date": "2026-09-17",
-        "damage_types": [
-            "Heavy rain",
-            "Waterlogging",
-        ],
-        "location": "Rampur",
-    }
-
-    image_result = {
-        "agent": "ImageAgent",
-        "domain": "agriculture",
-        "confidence": 0.65,
-        "risk_score": 0.35,
-        "decision": "PASS",
-        "evidence": [
-            "Image model predicted Wheat.",
-        ],
-        "contradictions": [],
-        "model_version": "TruthChain-Agriculture-Crop-v0.2",
-        "processing_time_ms": 10.0,
-        "predicted_crop": "Wheat",
-        "image_confidence": 0.65,
-        "claimed_crop": "Wheat",
-        "claim_crop_match": True,
-    }
-
-    satellite_result = {
-        "agent": "SatelliteAgent",
-        "domain": "agriculture",
-        "confidence": 0.70,
-        "risk_score": 0.30,
-        "decision": "PASS",
-        "evidence": [
-            "Satellite model predicted Wheat.",
-        ],
-        "contradictions": [],
-        "model_version": "Satellite-CropAgent-v0.2",
-        "processing_time_ms": 20.0,
-        "claimed_crop": "Wheat",
-        "predicted_crop": "Wheat",
-        "evidence_decision": "SUPPORT",
-        "scene_datetime": "2026-09-17T05:16:51.025000Z",
-    }
-
-    sensor_result = {
-        "agent": "SensorAgent",
-        "domain": "agriculture",
-        "confidence": 1.0,
-        "risk_score": 0.0,
-        "decision": "PASS",
-        "evidence": [
-            "Heavy rain detected.",
-            "Waterlogging detected.",
-        ],
-        "contradictions": [],
-        "model_version": "agriculture-sensor-agent-v0.1",
-        "processing_time_ms": 1.0,
-        "claimed_event": "Heavy rain",
-        "detected_events": [
-            "Heavy rain",
-            "Waterlogging",
-        ],
-        "evidence_decision": "SUPPORT",
-        "event_date": "2026-09-17",
-        "location": "Rampur",
-    }
-
-    print("\nCROSS-MODAL INPUT")
-    print("-" * 72)
-
-    print(
-        json.dumps(
-            {
-                "text": text_result,
-                "image": image_result,
-                "satellite": satellite_result,
-                "sensor": sensor_result,
-            },
-            indent=2,
-        )
-    )
-
-    result = analyze_cross_modal(
-        text_result=text_result,
-        image_result=image_result,
-        satellite_result=satellite_result,
-        sensor_result=sensor_result,
-    )
-
-    print("\nCROSS-MODAL RESULT")
-    print("-" * 72)
-
-    print(
-        json.dumps(
-            result,
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
-
-    print("-" * 72)
-
-    if result["decision"] != "ERROR":
-        print("CROSS-MODAL AGENT TEST: PASS")
-    else:
-        print("CROSS-MODAL AGENT TEST: FAIL")

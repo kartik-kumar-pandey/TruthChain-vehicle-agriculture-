@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 BASE_DIR = Path(__file__).resolve().parent
+sys.stdout.reconfigure(encoding='utf-8')
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 

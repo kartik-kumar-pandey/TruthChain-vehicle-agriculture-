@@ -41,7 +41,7 @@ type IntegrityRowProps = {
 };
 function IntegrityRow({ label, match, expected, computed }: IntegrityRowProps) {
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/50 p-4 transition-colors">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">

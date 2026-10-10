@@ -1,29 +1,18 @@
 """
-TruthChain Agriculture - Investigation Agent
+TruthChain Agriculture - Investigation Agent (LLM-Powered)
 
-Investigation / verification-planning layer for agriculture claims.
+Deep fraud investigation layer for agriculture claims.
+
+Uses Groq LLM (openai/gpt-oss-120b) for deep investigation reasoning,
+exactly mirroring the motor pipeline's LLM agent architecture.
+
+Its purpose is to:
+    1. Examine outputs from all evidence agents.
+    2. Use LLM to reason about fraud indicators and field visit priority.
+    3. Generate fraud_indicators[], field_visit_priority, and investigation_narrative.
+    4. Produce structured investigation result for downstream risk/consensus.
 
 This agent does NOT independently determine fraud.
-
-Its purpose is to examine the outputs of the evidence and cross-modal
-layers and determine:
-
-    1. What evidence is already available.
-    2. What contradictions require investigation.
-    3. What additional verification should be performed.
-    4. Whether human review should be considered.
-    5. Whether the claim can proceed to the risk/consensus layer.
-
-The actual external investigation integrations can be added later for:
-    - Weather/IMD verification
-    - Field boundary/cadastral verification
-    - Additional satellite scenes
-    - Claimant/location verification
-    - Historical crop evidence
-    - Policy/claim records
-    - Other authorized external sources
-
-This version is a deterministic investigation planner.
 
 Standardized agent contract:
 {
@@ -41,13 +30,22 @@ Standardized agent contract:
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from typing import Any, Dict, List, Optional
 
+import config  # noqa: F401
+from groq import Groq
 
-MODEL_VERSION = "agriculture-investigation-agent-v0.1"
+
+MODEL_VERSION = "agriculture-investigation-agent-llm-v1.0"
 DOMAIN = "agriculture"
 AGENT_NAME = "InvestigationAgent"
+
+GROQ_MODEL = "openai/gpt-oss-120b"
+REASONING_EFFORT = "default"
+MAX_COMPLETION_TOKENS = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -60,34 +58,96 @@ PRIORITY_LOW = "LOW"
 
 
 # ---------------------------------------------------------------------------
-# Investigation Agent
+# System prompt for Groq LLM investigation
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """
+You are the deep investigation component of an agriculture insurance claim
+verification system.
+
+You receive structured outputs from all evidence verification agents:
+  - TextAgent: extracted claim information from narrative
+  - ImageAgent: crop image analysis (CNN classification)
+  - SatelliteAgent: Sentinel-2 satellite evidence (NDVI, CropAgent v0.2)
+  - SensorAgent: weather/soil sensor analysis
+  - CrossModalAgent: cross-modal consistency assessment
+
+Your task is to:
+1. Analyze all evidence for potential fraud indicators.
+2. Identify specific red flags in the evidence chain.
+3. Determine field visit priority based on evidence quality.
+4. Recommend specific verification actions.
+5. Output a structured JSON investigation report.
+
+Do NOT:
+- Make a final insurance fraud determination
+- Recommend claim approval or denial
+- Invent information not present in the inputs
+
+Return ONLY valid JSON with exactly these fields:
+
+{
+  "investigation_score": number (0.0-1.0, higher = more investigation needed),
+  "field_visit_priority": "HIGH" | "MEDIUM" | "LOW",
+  "fraud_indicators": [string],
+  "supporting_factors": [string],
+  "verification_actions": [string],
+  "satellite_consistency": "CONSISTENT" | "INCONSISTENT" | "UNAVAILABLE",
+  "crop_fraud_risk": "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN",
+  "event_fraud_risk": "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN",
+  "decision": "PASS" | "SUSPICIOUS" | "INSUFFICIENT_DATA",
+  "human_review_recommended": boolean,
+  "investigation_narrative": string
+}
+
+Decision rules:
+- PASS: No significant fraud indicators, evidence is consistent
+- SUSPICIOUS: One or more fraud indicators detected
+- INSUFFICIENT_DATA: Too few modalities or evidence to make determination
+
+investigation_score: 0.0-0.3 = low investigation need, 0.3-0.6 = moderate, 0.6-1.0 = high
+
+Field visit priority:
+- HIGH: Significant contradictions, high claimed loss, suspicious patterns
+- MEDIUM: Some evidence gaps or moderate risk signals
+- LOW: Consistent evidence, low risk signals
+"""
+
+
+# ---------------------------------------------------------------------------
+# Investigation Agent (LLM-Powered)
 # ---------------------------------------------------------------------------
 
 class InvestigationAgent:
     """
-    Deterministic investigation-planning agent.
+    LLM-powered deep investigation agent for agriculture claims.
 
-    The agent consumes evidence from:
-        - TextAgent
-        - ImageAgent
-        - SatelliteAgent
-        - SensorAgent
-        - CrossModalAgent
+    Uses Groq LLM (openai/gpt-oss-120b) to reason over all evidence
+    and generate fraud indicators, field visit priority, and investigation
+    narrative.
 
-    It creates an auditable investigation plan.
-
-    Important:
-        investigation_score is NOT a fraud probability.
-        risk_score is NOT a final insurance risk score.
-
-        They represent the amount of additional verification warranted
-        by the currently available evidence.
+    This matches the motor pipeline's InvestigationAgent architecture.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        client: Optional[Groq] = None,
+        model: str = GROQ_MODEL,
+    ) -> None:
         self.model_version = MODEL_VERSION
         self.domain = DOMAIN
         self.agent_name = AGENT_NAME
+        self.model = model
+
+        if client is not None:
+            self.client = client
+        elif os.getenv("GROQ_API_KEY"):
+            try:
+                self.client = Groq()
+            except Exception:
+                self.client = None
+        else:
+            self.client = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -102,12 +162,12 @@ class InvestigationAgent:
         sensor_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build an investigation plan from available evidence.
+        Build an LLM-powered investigation report from available evidence.
 
         Parameters
         ----------
         cross_modal_result:
-            Output from CrossModalAgent.
+            Output from CrossModalAgent (LLM fusion result).
 
         text_result:
             Output from TextAgent.
@@ -136,14 +196,6 @@ class InvestigationAgent:
             satellite_result = satellite_result or {}
             sensor_result = sensor_result or {}
 
-            evidence: List[str] = []
-            contradictions: List[str] = []
-            investigation_tasks: List[Dict[str, Any]] = []
-
-            # ----------------------------------------------------------
-            # Basic validation
-            # ----------------------------------------------------------
-
             available_modalities = self._available_modalities(
                 text_result=text_result,
                 image_result=image_result,
@@ -158,187 +210,142 @@ class InvestigationAgent:
                 )
 
             # ----------------------------------------------------------
-            # Cross-modal status
+            # Build investigation context for LLM
             # ----------------------------------------------------------
 
-            cross_modal_decision = cross_modal_result.get(
-                "decision"
+            investigation_context = self._build_investigation_context(
+                cross_modal_result=cross_modal_result,
+                text_result=text_result,
+                image_result=image_result,
+                satellite_result=satellite_result,
+                sensor_result=sensor_result,
+                available_modalities=available_modalities,
             )
 
-            agreement_score = self._safe_float(
-                cross_modal_result.get(
-                    "agreement_score"
-                )
+            # ----------------------------------------------------------
+            # LLM deep investigation
+            # ----------------------------------------------------------
+
+            llm_result = self._llm_investigate(investigation_context)
+
+            # ----------------------------------------------------------
+            # Extract validated LLM output
+            # ----------------------------------------------------------
+
+            investigation_score = float(
+                llm_result.get("investigation_score", 0.5)
+            )
+            investigation_score = max(0.0, min(1.0, investigation_score))
+
+            priority = str(
+                llm_result.get("field_visit_priority", PRIORITY_MEDIUM)
+            ).upper()
+            if priority not in {PRIORITY_HIGH, PRIORITY_MEDIUM, PRIORITY_LOW}:
+                priority = PRIORITY_MEDIUM
+
+            fraud_indicators: List[str] = [
+                str(f) for f in llm_result.get("fraud_indicators", [])
+                if f and str(f).strip()
+            ]
+
+            supporting_factors: List[str] = [
+                str(f) for f in llm_result.get("supporting_factors", [])
+                if f and str(f).strip()
+            ]
+
+            verification_actions: List[str] = [
+                str(a) for a in llm_result.get("verification_actions", [])
+                if a and str(a).strip()
+            ]
+
+            decision = str(
+                llm_result.get("decision", "INSUFFICIENT_DATA")
+            ).upper()
+            if decision not in {"PASS", "SUSPICIOUS", "INSUFFICIENT_DATA"}:
+                decision = "INSUFFICIENT_DATA"
+
+            human_review_recommended = bool(
+                llm_result.get("human_review_recommended", False)
             )
 
-            cross_modal_risk = self._safe_float(
-                cross_modal_result.get(
-                    "risk_score"
-                )
-            )
+            investigation_narrative = str(
+                llm_result.get("investigation_narrative", "")
+            ).strip()
 
-            contradiction_count = self._safe_int(
-                cross_modal_result.get(
-                    "contradiction_count"
-                )
-            )
+            satellite_consistency = str(
+                llm_result.get("satellite_consistency", "UNAVAILABLE")
+            ).upper()
 
+            crop_fraud_risk = str(
+                llm_result.get("crop_fraud_risk", "UNKNOWN")
+            ).upper()
+
+            event_fraud_risk = str(
+                llm_result.get("event_fraud_risk", "UNKNOWN")
+            ).upper()
+
+            # ----------------------------------------------------------
+            # Build evidence and contradictions lists
+            # ----------------------------------------------------------
+
+            evidence: List[str] = []
+            contradictions: List[str] = list(fraud_indicators)
+
+            cross_modal_decision = cross_modal_result.get("decision")
             if cross_modal_decision:
                 evidence.append(
-                    f"Cross-modal decision is '{cross_modal_decision}'."
+                    f"Cross-modal LLM decision: '{cross_modal_decision}'."
                 )
 
-            if agreement_score is not None:
+            cross_modal_score = cross_modal_result.get("cross_modal_score")
+            if cross_modal_score is not None:
                 evidence.append(
-                    f"Cross-modal agreement score is "
-                    f"{agreement_score:.3f}."
+                    f"Cross-modal inconsistency score: {cross_modal_score:.3f}."
                 )
 
-            if contradiction_count is not None:
+            llm_contradictions = cross_modal_result.get("contradictions", [])
+            if llm_contradictions:
                 evidence.append(
-                    f"Cross-modal contradiction count is "
-                    f"{contradiction_count}."
+                    f"CrossModal contradictions: {'; '.join(str(c) for c in llm_contradictions[:3])}."
                 )
 
-            # ----------------------------------------------------------
-            # Identify investigation needs
-            # ----------------------------------------------------------
-
-            self._investigate_crop_consistency(
-                cross_modal_result=cross_modal_result,
-                image_result=image_result,
-                satellite_result=satellite_result,
-                investigation_tasks=investigation_tasks,
-                evidence=evidence,
-                contradictions=contradictions,
-            )
-
-            self._investigate_environmental_event(
-                cross_modal_result=cross_modal_result,
-                sensor_result=sensor_result,
-                text_result=text_result,
-                investigation_tasks=investigation_tasks,
-                evidence=evidence,
-                contradictions=contradictions,
-            )
-
-            self._investigate_satellite_context(
-                cross_modal_result=cross_modal_result,
-                satellite_result=satellite_result,
-                investigation_tasks=investigation_tasks,
-                evidence=evidence,
-                contradictions=contradictions,
-            )
-
-            self._investigate_loss_claim(
-                cross_modal_result=cross_modal_result,
-                text_result=text_result,
-                image_result=image_result,
-                satellite_result=satellite_result,
-                sensor_result=sensor_result,
-                investigation_tasks=investigation_tasks,
-                evidence=evidence,
-                contradictions=contradictions,
-            )
-
-            self._investigate_temporal_context(
-                cross_modal_result=cross_modal_result,
-                satellite_result=satellite_result,
-                sensor_result=sensor_result,
-                investigation_tasks=investigation_tasks,
-                evidence=evidence,
-                contradictions=contradictions,
-            )
-
-            self._investigate_missing_evidence(
-                cross_modal_result=cross_modal_result,
-                text_result=text_result,
-                image_result=image_result,
-                satellite_result=satellite_result,
-                sensor_result=sensor_result,
-                investigation_tasks=investigation_tasks,
-                evidence=evidence,
-                contradictions=contradictions,
-            )
-
-            # ----------------------------------------------------------
-            # Determine investigation priority
-            # ----------------------------------------------------------
-
-            priority = self._calculate_priority(
-                cross_modal_decision=cross_modal_decision,
-                agreement_score=agreement_score,
-                contradiction_count=contradiction_count,
-                task_count=len(investigation_tasks),
-            )
+            evidence.extend(supporting_factors)
 
             evidence.append(
-                f"Investigation priority is '{priority}'."
+                f"LLM investigation priority: '{priority}'."
+            )
+            evidence.append(
+                f"LLM investigation score: {investigation_score:.3f}."
+            )
+            evidence.append(
+                f"Fraud indicators identified: {len(fraud_indicators)}."
             )
 
-            # ----------------------------------------------------------
-            # Determine investigation decision
-            # ----------------------------------------------------------
-
-            if cross_modal_decision == "SUSPICIOUS":
-                decision = "SUSPICIOUS"
-
-            elif contradiction_count is not None and contradiction_count > 0:
-                decision = "SUSPICIOUS"
-
-            elif not available_modalities:
-                decision = "INSUFFICIENT_DATA"
-
-            elif priority == PRIORITY_HIGH:
-                decision = "SUSPICIOUS"
-
-            elif priority == PRIORITY_MEDIUM:
-                decision = "INSUFFICIENT_DATA"
-
-            else:
-                decision = "PASS"
-
-            # ----------------------------------------------------------
-            # Investigation score
-            # ----------------------------------------------------------
-
-            investigation_score = self._calculate_investigation_score(
-                cross_modal_decision=cross_modal_decision,
-                agreement_score=agreement_score,
-                contradiction_count=contradiction_count,
-                task_count=len(investigation_tasks),
-                available_modalities=len(available_modalities),
-            )
-
-            # This is additional-verification need, not fraud probability.
-            risk_score = investigation_score
-
-            confidence = self._calculate_confidence(
-                available_modalities=len(available_modalities),
-                task_count=len(investigation_tasks),
-                contradiction_count=contradiction_count,
-                agreement_score=agreement_score,
-            )
-
-            # ----------------------------------------------------------
-            # Human review recommendation
-            # ----------------------------------------------------------
-
-            human_review_recommended = self._human_review_recommendation(
-                decision=decision,
-                priority=priority,
-                investigation_tasks=investigation_tasks,
-            )
+            if investigation_narrative:
+                evidence.append(
+                    f"Investigation narrative: {investigation_narrative}"
+                )
 
             if human_review_recommended:
                 evidence.append(
-                    "Human review is recommended before final claim "
-                    "resolution."
+                    "Human review is recommended before final claim resolution."
                 )
 
+            evidence.append(
+                "Evidence modalities available: "
+                + ", ".join(available_modalities)
+                + f" ({len(available_modalities)})."
+            )
+
             # ----------------------------------------------------------
-            # Processing time
+            # Confidence
             # ----------------------------------------------------------
+
+            confidence = self._calculate_confidence(
+                investigation_score=investigation_score,
+                available_modality_count=len(available_modalities),
+                fraud_indicator_count=len(fraud_indicators),
+            )
 
             processing_time_ms = round(
                 (time.perf_counter() - start_time) * 1000,
@@ -349,44 +356,43 @@ class InvestigationAgent:
                 "agent": self.agent_name,
                 "domain": self.domain,
                 "confidence": round(confidence, 6),
-                "risk_score": round(risk_score, 6),
+                "risk_score": round(investigation_score, 6),
                 "decision": decision,
                 "evidence": evidence,
                 "contradictions": contradictions,
                 "model_version": self.model_version,
                 "processing_time_ms": processing_time_ms,
 
-                # Investigation information.
-                "investigation_score": round(
-                    investigation_score,
-                    6,
-                ),
+                # Investigation-specific fields.
+                "investigation_score": round(investigation_score, 6),
                 "investigation_priority": priority,
-                "investigation_tasks": investigation_tasks,
+                "field_visit_priority": priority,
+                "fraud_indicators": fraud_indicators,
+                "verification_actions": verification_actions,
+                "investigation_tasks": [
+                    {"action": a, "priority": priority}
+                    for a in verification_actions
+                ],
                 "available_modalities": available_modalities,
                 "human_review_recommended": human_review_recommended,
+                "investigation_narrative": investigation_narrative,
+                "satellite_consistency": satellite_consistency,
+                "crop_fraud_risk": crop_fraud_risk,
+                "event_fraud_risk": event_fraud_risk,
 
                 # Context passed downstream.
-                "claimed_crop": cross_modal_result.get(
-                    "claimed_crop"
-                ),
-                "claimed_event": cross_modal_result.get(
-                    "claimed_event"
-                ),
-                "claimed_loss_percent": cross_modal_result.get(
-                    "claimed_loss_percent"
-                ),
-                "event_date": cross_modal_result.get(
-                    "event_date"
-                ),
-                "location": cross_modal_result.get(
-                    "location"
-                ),
+                "claimed_crop": cross_modal_result.get("claimed_crop"),
+                "claimed_event": cross_modal_result.get("claimed_event"),
+                "claimed_loss_percent": cross_modal_result.get("claimed_loss_percent"),
+                "event_date": cross_modal_result.get("event_date"),
+                "location": cross_modal_result.get("location"),
+
+                # LLM audit information.
+                "llm_provider": "groq",
+                "llm_model": self.model,
 
                 # Semantic clarification.
-                "risk_score_meaning": (
-                    "additional_verification_need"
-                ),
+                "risk_score_meaning": "additional_verification_need",
                 "agent_version": MODEL_VERSION,
             }
 
@@ -397,527 +403,225 @@ class InvestigationAgent:
             )
 
     # ------------------------------------------------------------------
-    # Crop investigation
+    # Investigation context builder
     # ------------------------------------------------------------------
 
-    def _investigate_crop_consistency(
-        self,
-        cross_modal_result: Dict[str, Any],
-        image_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-        investigation_tasks: List[Dict[str, Any]],
-        evidence: List[str],
-        contradictions: List[str],
-    ) -> None:
-
-        crop_check = self._find_check(
-            cross_modal_result,
-            "crop_consistency",
-        )
-
-        if not crop_check:
-            return
-
-        status = crop_check.get("status")
-
-        if status == "PASS":
-            evidence.append(
-                "Image and satellite crop evidence are currently "
-                "consistent with the normalized claim crop."
-            )
-
-            return
-
-        if status == "CONTRADICTION":
-            contradictions.extend(
-                crop_check.get(
-                    "contradictions",
-                    [],
-                )
-            )
-
-            investigation_tasks.append(
-                {
-                    "task_id": "CROP-001",
-                    "priority": PRIORITY_HIGH,
-                    "type": "crop_verification",
-                    "description": (
-                        "Verify the claimed crop against additional "
-                        "field imagery and/or additional satellite "
-                        "observations near the claim event period."
-                    ),
-                    "sources": [
-                        "additional_satellite_scene",
-                        "additional_field_image",
-                    ],
-                    "reason": (
-                        "Cross-modal crop evidence contains a "
-                        "contradiction."
-                    ),
-                }
-            )
-
-    # ------------------------------------------------------------------
-    # Environmental event investigation
-    # ------------------------------------------------------------------
-
-    def _investigate_environmental_event(
-        self,
-        cross_modal_result: Dict[str, Any],
-        sensor_result: Dict[str, Any],
-        text_result: Dict[str, Any],
-        investigation_tasks: List[Dict[str, Any]],
-        evidence: List[str],
-        contradictions: List[str],
-    ) -> None:
-
-        event_check = self._find_check(
-            cross_modal_result,
-            "event_consistency",
-        )
-
-        if not event_check:
-            return
-
-        status = event_check.get("status")
-
-        if status == "PASS":
-            evidence.append(
-                "Narrative and environmental evidence currently "
-                "support the claimed event."
-            )
-            return
-
-        if status == "CONTRADICTION":
-            contradictions.extend(
-                event_check.get(
-                    "contradictions",
-                    [],
-                )
-            )
-
-            investigation_tasks.append(
-                {
-                    "task_id": "EVENT-001",
-                    "priority": PRIORITY_HIGH,
-                    "type": "environmental_event_verification",
-                    "description": (
-                        "Verify the claimed environmental event using "
-                        "independent weather/environmental observations "
-                        "for the relevant field and event period."
-                    ),
-                    "sources": [
-                        "weather_station",
-                        "authorized_weather_api",
-                        "rainfall_records",
-                    ],
-                    "reason": (
-                        "Claimed event is inconsistent with available "
-                        "environmental evidence."
-                    ),
-                }
-            )
-
-    # ------------------------------------------------------------------
-    # Satellite investigation
-    # ------------------------------------------------------------------
-
-    def _investigate_satellite_context(
-        self,
-        cross_modal_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-        investigation_tasks: List[Dict[str, Any]],
-        evidence: List[str],
-        contradictions: List[str],
-    ) -> None:
-
-        if not satellite_result:
-            investigation_tasks.append(
-                {
-                    "task_id": "SAT-001",
-                    "priority": PRIORITY_MEDIUM,
-                    "type": "satellite_verification",
-                    "description": (
-                        "Obtain a suitable satellite observation for "
-                        "the claim field and event period."
-                    ),
-                    "sources": [
-                        "authorized_stac_catalog",
-                    ],
-                    "reason": (
-                        "No satellite evidence was supplied."
-                    ),
-                }
-            )
-            return
-
-        scene_id = satellite_result.get(
-            "scene_id"
-        )
-
-        scene_datetime = satellite_result.get(
-            "scene_datetime"
-        )
-
-        evidence_decision = satellite_result.get(
-            "evidence_decision"
-        )
-
-        if scene_id:
-            evidence.append(
-                f"Satellite scene '{scene_id}' is available for "
-                "investigation."
-            )
-
-        if scene_datetime:
-            evidence.append(
-                f"Satellite scene acquisition time is "
-                f"'{scene_datetime}'."
-            )
-
-        if evidence_decision == "CONTRADICTION":
-            investigation_tasks.append(
-                {
-                    "task_id": "SAT-002",
-                    "priority": PRIORITY_HIGH,
-                    "type": "satellite_reverification",
-                    "description": (
-                        "Review additional satellite scenes before "
-                        "drawing conclusions from the contradictory "
-                        "crop evidence."
-                    ),
-                    "sources": [
-                        "authorized_stac_catalog",
-                        "additional_satellite_scene",
-                    ],
-                    "reason": (
-                        "Current satellite evidence contradicts the "
-                        "claimed crop/event context."
-                    ),
-                }
-            )
-
-    # ------------------------------------------------------------------
-    # Loss investigation
-    # ------------------------------------------------------------------
-
-    def _investigate_loss_claim(
+    def _build_investigation_context(
         self,
         cross_modal_result: Dict[str, Any],
         text_result: Dict[str, Any],
         image_result: Dict[str, Any],
         satellite_result: Dict[str, Any],
         sensor_result: Dict[str, Any],
-        investigation_tasks: List[Dict[str, Any]],
-        evidence: List[str],
-        contradictions: List[str],
-    ) -> None:
+        available_modalities: List[str],
+    ) -> str:
+        """Build structured context for LLM investigation."""
 
-        claimed_loss = cross_modal_result.get(
-            "claimed_loss_percent"
-        )
+        lines = []
 
-        if claimed_loss is None:
-            investigation_tasks.append(
-                {
-                    "task_id": "LOSS-001",
-                    "priority": PRIORITY_MEDIUM,
-                    "type": "loss_quantification",
-                    "description": (
-                        "Obtain or calculate an independently supported "
-                        "estimate of crop damage/loss before final "
-                        "claim resolution."
-                    ),
-                    "sources": [
-                        "field_damage_assessment",
-                        "validated_damage_model",
-                        "additional_imagery",
-                    ],
-                    "reason": (
-                        "No explicit quantified loss claim was "
-                        "available."
-                    ),
-                }
-            )
-            return
+        lines.append("=== CLAIM OVERVIEW (from CrossModalAgent LLM) ===")
+        lines.append(f"Claimed crop: {cross_modal_result.get('claimed_crop', 'N/A')}")
+        lines.append(f"Claimed event: {cross_modal_result.get('claimed_event', 'N/A')}")
+        lines.append(f"Claimed loss: {cross_modal_result.get('claimed_loss_percent', 'N/A')}%")
+        lines.append(f"Location: {cross_modal_result.get('location', 'N/A')}")
+        lines.append(f"Event date: {cross_modal_result.get('event_date', 'N/A')}")
+        lines.append(f"Cross-modal decision: {cross_modal_result.get('decision', 'N/A')}")
+        lines.append(f"Cross-modal inconsistency score: {cross_modal_result.get('cross_modal_score', 'N/A')}")
+        lines.append(f"Agreement level: {cross_modal_result.get('agreement_level', 'N/A')}")
+        lines.append(f"Contradiction count: {cross_modal_result.get('contradiction_count', 0)}")
 
-        evidence.append(
-            f"Claimed crop loss is {float(claimed_loss):.2f}%."
-        )
+        llm_contradictions = cross_modal_result.get("contradictions", [])
+        if llm_contradictions:
+            lines.append(f"Cross-modal contradictions:")
+            for c in llm_contradictions[:5]:
+                lines.append(f"  - {c}")
 
-        # IMPORTANT:
-        # Do not derive crop loss from model confidence.
-        #
-        # Current ImageAgent and SatelliteAgent predict crop identity,
-        # not validated percentage crop damage.
-        #
-        # Therefore any loss percentage must remain a claim until a
-        # dedicated damage-estimation source is available.
+        llm_reasoning = cross_modal_result.get("llm_reasoning", "")
+        if llm_reasoning:
+            lines.append(f"Cross-modal LLM reasoning: {llm_reasoning}")
 
-        investigation_tasks.append(
-            {
-                "task_id": "LOSS-002",
-                "priority": PRIORITY_MEDIUM,
-                "type": "loss_quantification",
-                "description": (
-                    "Independently validate the claimed crop-loss "
-                    "percentage using a dedicated damage assessment "
-                    "source."
-                ),
-                "sources": [
-                    "field_damage_assessment",
-                    "validated_damage_model",
-                    "multi_temporal_satellite_imagery",
+        crop_consistency = cross_modal_result.get("crop_consistency", {})
+        if isinstance(crop_consistency, dict):
+            lines.append(f"Crop consistency: {crop_consistency.get('status', 'N/A')}")
+            lines.append(f"  Image detected: {crop_consistency.get('image_detected', 'N/A')}")
+            lines.append(f"  Satellite detected: {crop_consistency.get('satellite_detected', 'N/A')}")
+            expl = crop_consistency.get("explanation", "")
+            if expl:
+                lines.append(f"  Explanation: {expl}")
+
+        event_consistency = cross_modal_result.get("event_consistency", {})
+        if isinstance(event_consistency, dict):
+            lines.append(f"Event consistency: {event_consistency.get('status', 'N/A')}")
+            expl = event_consistency.get("explanation", "")
+            if expl:
+                lines.append(f"  Explanation: {expl}")
+
+        lines.append("\n=== TEXT AGENT ===")
+        if text_result:
+            lines.append(f"Decision: {text_result.get('decision', 'N/A')}")
+            lines.append(f"Extracted crop: {text_result.get('extracted_crop', 'N/A')}")
+            lines.append(f"Damage types: {text_result.get('damage_types', [])}")
+            lines.append(f"Claimed loss%: {text_result.get('claimed_loss_percent', 'N/A')}")
+            lines.append(f"Confidence: {text_result.get('confidence', 0):.3f}")
+
+        lines.append("\n=== IMAGE AGENT (Crop CNN) ===")
+        if image_result and image_result.get("decision") not in (None, ""):
+            lines.append(f"Decision: {image_result.get('decision', 'N/A')}")
+            lines.append(f"Crop classification: {image_result.get('crop_classification', image_result.get('predicted_crop', 'N/A'))}")
+            lines.append(f"Damage level: {image_result.get('damage_level', 'N/A')}")
+            lines.append(f"Confidence: {image_result.get('confidence', 0):.3f}")
+        else:
+            lines.append("Not available or insufficient.")
+
+        lines.append("\n=== SATELLITE AGENT (Sentinel-2 CropAgent v0.2) ===")
+        if satellite_result and satellite_result.get("decision") not in (None, ""):
+            lines.append(f"Decision: {satellite_result.get('decision', 'N/A')}")
+            lines.append(f"Predicted crop: {satellite_result.get('predicted_crop', 'N/A')}")
+            ndvi = satellite_result.get("ndvi") or satellite_result.get("ndvi_mean")
+            lines.append(f"NDVI: {ndvi}")
+            lines.append(f"Evidence decision: {satellite_result.get('evidence_decision', 'N/A')}")
+            lines.append(f"Confidence: {satellite_result.get('confidence', 0):.3f}")
+        else:
+            lines.append("Not available or insufficient.")
+
+        lines.append("\n=== SENSOR AGENT (Weather/Soil) ===")
+        if sensor_result and sensor_result.get("decision") not in (None, ""):
+            lines.append(f"Decision: {sensor_result.get('decision', 'N/A')}")
+            lines.append(f"Detected events: {sensor_result.get('detected_events', [])}")
+            lines.append(f"Evidence decision: {sensor_result.get('evidence_decision', 'N/A')}")
+            obs = sensor_result.get("observations", {})
+            if obs:
+                obs_str = ", ".join(
+                    f"{k}={v}" for k, v in list(obs.items())[:6]
+                )
+                lines.append(f"Observations: {obs_str}")
+        else:
+            lines.append("Not available or insufficient.")
+
+        lines.append(f"\n=== AVAILABLE MODALITIES ===")
+        lines.append(f"{', '.join(available_modalities)} ({len(available_modalities)}/4)")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # LLM investigation
+    # ------------------------------------------------------------------
+
+    def _llm_investigate(
+        self,
+        investigation_context: str,
+    ) -> Dict[str, Any]:
+        """
+        Use Groq LLM for deep investigation reasoning.
+        Falls back to heuristic analysis if LLM is unavailable.
+        """
+
+        if self.client is None:
+            return self._heuristic_fallback(investigation_context)
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Perform a deep investigation analysis of this "
+                            "agriculture insurance claim:\n\n"
+                            f"{investigation_context}"
+                        ),
+                    },
                 ],
-                "reason": (
-                    "Current crop-classification evidence does not "
-                    "measure percentage crop loss."
-                ),
-                "claimed_loss_percent": float(
-                    claimed_loss
-                ),
-            }
-        )
-
-    # ------------------------------------------------------------------
-    # Temporal investigation
-    # ------------------------------------------------------------------
-
-    def _investigate_temporal_context(
-        self,
-        cross_modal_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-        sensor_result: Dict[str, Any],
-        investigation_tasks: List[Dict[str, Any]],
-        evidence: List[str],
-        contradictions: List[str],
-    ) -> None:
-
-        event_date = cross_modal_result.get(
-            "event_date"
-        )
-
-        if not event_date:
-            investigation_tasks.append(
-                {
-                    "task_id": "TIME-001",
-                    "priority": PRIORITY_MEDIUM,
-                    "type": "event_date_verification",
-                    "description": (
-                        "Verify the claim event date before using "
-                        "temporal evidence for final resolution."
-                    ),
-                    "sources": [
-                        "claim_record",
-                        "weather_records",
-                        "satellite_acquisition_metadata",
-                    ],
-                    "reason": (
-                        "No normalized claim event date was available."
-                    ),
-                }
+                temperature=0,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+                response_format={"type": "json_object"},
             )
-            return
 
-        satellite_datetime = satellite_result.get(
-            "scene_datetime"
-        )
+            content = response.choices[0].message.content
 
-        sensor_date = sensor_result.get(
-            "event_date"
-        )
-
-        if satellite_datetime:
-            satellite_date = str(
-                satellite_datetime
-            )[:10]
-
-            if satellite_date != str(event_date)[:10]:
-                contradictions.append(
-                    f"Satellite scene date '{satellite_date}' "
-                    f"does not match claim event date "
-                    f"'{event_date}'."
+            if not content:
+                raise RuntimeError(
+                    "Groq returned an empty investigation response."
                 )
 
-                investigation_tasks.append(
-                    {
-                        "task_id": "TIME-002",
-                        "priority": PRIORITY_HIGH,
-                        "type": "temporal_satellite_verification",
-                        "description": (
-                            "Obtain satellite observations closer to "
-                            "the actual claimed event date."
-                        ),
-                        "sources": [
-                            "authorized_stac_catalog",
-                        ],
-                        "reason": (
-                            "Current satellite acquisition date does "
-                            "not match the claim event date."
-                        ),
-                    }
+            parsed = json.loads(content)
+
+            if not isinstance(parsed, dict):
+                raise RuntimeError(
+                    "Groq investigation response must be a JSON object."
                 )
 
-        if sensor_date:
-            if str(sensor_date)[:10] != str(event_date)[:10]:
-                contradictions.append(
-                    f"Sensor evidence date '{sensor_date}' "
-                    f"does not match claim event date "
-                    f"'{event_date}'."
-                )
+            return parsed
 
-                investigation_tasks.append(
-                    {
-                        "task_id": "TIME-003",
-                        "priority": PRIORITY_HIGH,
-                        "type": "temporal_sensor_verification",
-                        "description": (
-                            "Verify environmental observations for "
-                            "the actual claimed event date."
-                        ),
-                        "sources": [
-                            "weather_station",
-                            "authorized_weather_api",
-                        ],
-                        "reason": (
-                            "Sensor evidence date does not match "
-                            "the claim event date."
-                        ),
-                    }
-                )
+        except Exception:
+            return self._heuristic_fallback(investigation_context)
 
-    # ------------------------------------------------------------------
-    # Missing evidence
-    # ------------------------------------------------------------------
-
-    def _investigate_missing_evidence(
+    def _heuristic_fallback(
         self,
-        cross_modal_result: Dict[str, Any],
-        text_result: Dict[str, Any],
-        image_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-        sensor_result: Dict[str, Any],
-        investigation_tasks: List[Dict[str, Any]],
-        evidence: List[str],
-        contradictions: List[str],
-    ) -> None:
+        investigation_context: str,
+    ) -> Dict[str, Any]:
+        """Heuristic fallback when Groq LLM is unavailable."""
 
-        expected = {
-            "TextAgent": text_result,
-            "ImageAgent": image_result,
-            "SatelliteAgent": satellite_result,
-            "SensorAgent": sensor_result,
+        suspicious = "SUSPICIOUS" in investigation_context
+        score = 0.6 if suspicious else 0.3
+
+        return {
+            "investigation_score": score,
+            "field_visit_priority": PRIORITY_HIGH if suspicious else PRIORITY_LOW,
+            "fraud_indicators": [
+                "LLM unavailable — heuristic fallback used. Manual review recommended."
+            ] if suspicious else [],
+            "supporting_factors": [
+                "LLM investigation not available. Deterministic fallback activated."
+            ],
+            "verification_actions": [
+                "Manual review of cross-modal contradictions.",
+                "Field visit recommended to verify crop and damage claims.",
+            ],
+            "satellite_consistency": "UNAVAILABLE",
+            "crop_fraud_risk": "UNKNOWN",
+            "event_fraud_risk": "UNKNOWN",
+            "decision": "SUSPICIOUS" if suspicious else "INSUFFICIENT_DATA",
+            "human_review_recommended": True,
+            "investigation_narrative": (
+                "LLM investigation unavailable. Heuristic analysis detected "
+                f"{'suspicious signals' if suspicious else 'no clear signals'}. "
+                "Human review is recommended."
+            ),
         }
 
-        missing = [
-            name
-            for name, result in expected.items()
-            if not result
-        ]
-
-        if missing:
-            evidence.append(
-                "Missing evidence modalities: "
-                + ", ".join(missing)
-                + "."
-            )
-
-            investigation_tasks.append(
-                {
-                    "task_id": "DATA-001",
-                    "priority": PRIORITY_MEDIUM,
-                    "type": "evidence_completion",
-                    "description": (
-                        "Obtain the missing evidence modalities before "
-                        "making a final automated determination."
-                    ),
-                    "sources": missing,
-                    "reason": (
-                        "Cross-modal analysis has incomplete evidence."
-                    ),
-                }
-            )
-
     # ------------------------------------------------------------------
-    # Priority
+    # Available modalities
     # ------------------------------------------------------------------
 
-    def _calculate_priority(
+    def _available_modalities(
         self,
-        cross_modal_decision: Optional[str],
-        agreement_score: Optional[float],
-        contradiction_count: Optional[int],
-        task_count: int,
-    ) -> str:
+        text_result: Dict[str, Any],
+        image_result: Dict[str, Any],
+        satellite_result: Dict[str, Any],
+        sensor_result: Dict[str, Any],
+    ) -> List[str]:
+        """Return list of available evidence modalities."""
 
-        if (
-            cross_modal_decision == "SUSPICIOUS"
-            or (
-                contradiction_count is not None
-                and contradiction_count > 0
-            )
-        ):
-            return PRIORITY_HIGH
+        available = []
 
-        if (
-            agreement_score is not None
-            and agreement_score < 0.60
-        ):
-            return PRIORITY_HIGH
+        if text_result and text_result.get("decision") not in (None, ""):
+            available.append("TextAgent")
 
-        if task_count >= 3:
-            return PRIORITY_MEDIUM
+        if image_result and image_result.get("decision") not in (None, ""):
+            available.append("ImageAgent")
 
-        if task_count > 0:
-            return PRIORITY_LOW
+        if satellite_result and satellite_result.get("decision") not in (None, ""):
+            available.append("SatelliteAgent")
 
-        return PRIORITY_LOW
+        if sensor_result and sensor_result.get("decision") not in (None, ""):
+            available.append("SensorAgent")
 
-    # ------------------------------------------------------------------
-    # Investigation score
-    # ------------------------------------------------------------------
-
-    def _calculate_investigation_score(
-        self,
-        cross_modal_decision: Optional[str],
-        agreement_score: Optional[float],
-        contradiction_count: Optional[int],
-        task_count: int,
-        available_modalities: int,
-    ) -> float:
-
-        score = 0.0
-
-        if cross_modal_decision == "SUSPICIOUS":
-            score += 0.40
-
-        if contradiction_count:
-            score += min(
-                contradiction_count * 0.20,
-                0.60,
-            )
-
-        if agreement_score is not None:
-            score += (
-                max(0.0, 1.0 - agreement_score)
-                * 0.30
-            )
-
-        if task_count:
-            score += min(
-                task_count * 0.05,
-                0.25,
-            )
-
-        if available_modalities < 4:
-            score += (
-                4 - available_modalities
-            ) * 0.05
-
-        return max(
-            0.0,
-            min(1.0, score),
-        )
+        return available
 
     # ------------------------------------------------------------------
     # Confidence
@@ -925,144 +629,25 @@ class InvestigationAgent:
 
     def _calculate_confidence(
         self,
-        available_modalities: int,
-        task_count: int,
-        contradiction_count: Optional[int],
-        agreement_score: Optional[float],
+        investigation_score: float,
+        available_modality_count: int,
+        fraud_indicator_count: int,
     ) -> float:
+        """Calculate investigation confidence."""
 
-        coverage = min(
-            available_modalities / 4.0,
-            1.0,
-        )
+        if available_modality_count == 0:
+            return 0.0
 
-        agreement = (
-            agreement_score
-            if agreement_score is not None
-            else 0.0
-        )
+        modality_factor = min(available_modality_count / 4.0, 1.0)
+        indicator_penalty = min(0.30, fraud_indicator_count * 0.06)
 
-        contradiction_penalty = min(
-            (contradiction_count or 0) * 0.15,
-            0.60,
-        )
-
-        # Investigation confidence means confidence in the assessment
-        # of what verification is needed, not confidence in fraud.
         confidence = (
-            0.45 * coverage
-            + 0.45 * agreement
-            + 0.10 * min(task_count / 5.0, 1.0)
-            - contradiction_penalty
+            0.60 * modality_factor
+            + 0.30 * (1.0 - investigation_score)
+            - indicator_penalty
         )
 
-        return max(
-            0.0,
-            min(1.0, confidence),
-        )
-
-    # ------------------------------------------------------------------
-    # Human review
-    # ------------------------------------------------------------------
-
-    def _human_review_recommendation(
-        self,
-        decision: str,
-        priority: str,
-        investigation_tasks: List[Dict[str, Any]],
-    ) -> bool:
-
-        if decision == "SUSPICIOUS":
-            return True
-
-        if priority == PRIORITY_HIGH:
-            return True
-
-        high_priority_tasks = sum(
-            1
-            for task in investigation_tasks
-            if task.get("priority") == PRIORITY_HIGH
-        )
-
-        return high_priority_tasks > 0
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _available_modalities(
-        text_result: Dict[str, Any],
-        image_result: Dict[str, Any],
-        satellite_result: Dict[str, Any],
-        sensor_result: Dict[str, Any],
-    ) -> List[str]:
-
-        results = [
-            ("TextAgent", text_result),
-            ("ImageAgent", image_result),
-            ("SatelliteAgent", satellite_result),
-            ("SensorAgent", sensor_result),
-        ]
-
-        available = []
-
-        for name, result in results:
-            if not result:
-                continue
-
-            if result.get("decision") == "ERROR":
-                continue
-
-            available.append(name)
-
-        return available
-
-    @staticmethod
-    def _find_check(
-        cross_modal_result: Dict[str, Any],
-        name: str,
-    ) -> Optional[Dict[str, Any]]:
-
-        checks = cross_modal_result.get(
-            "cross_modal_checks",
-            [],
-        )
-
-        if not isinstance(checks, list):
-            return None
-
-        for check in checks:
-            if check.get("name") == name:
-                return check
-
-        return None
-
-    @staticmethod
-    def _safe_float(
-        value: Any,
-    ) -> Optional[float]:
-
-        if value is None:
-            return None
-
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _safe_int(
-        value: Any,
-    ) -> Optional[int]:
-
-        if value is None:
-            return None
-
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return max(0.0, min(1.0, confidence))
 
     # ------------------------------------------------------------------
     # Error result
@@ -1091,227 +676,23 @@ class InvestigationAgent:
             "processing_time_ms": processing_time_ms,
             "investigation_score": 1.0,
             "investigation_priority": PRIORITY_HIGH,
+            "field_visit_priority": PRIORITY_HIGH,
+            "fraud_indicators": [],
+            "verification_actions": [],
             "investigation_tasks": [],
             "available_modalities": [],
             "human_review_recommended": True,
+            "investigation_narrative": f"Investigation failed: {message}",
+            "satellite_consistency": "UNAVAILABLE",
+            "crop_fraud_risk": "UNKNOWN",
+            "event_fraud_risk": "UNKNOWN",
             "claimed_crop": None,
             "claimed_event": None,
             "claimed_loss_percent": None,
             "event_date": None,
             "location": None,
+            "llm_provider": "groq",
+            "llm_model": self.model,
             "risk_score_meaning": "additional_verification_need",
             "agent_version": MODEL_VERSION,
         }
-
-
-# ---------------------------------------------------------------------------
-# Singleton / convenience API
-# ---------------------------------------------------------------------------
-
-_investigation_agent: Optional[InvestigationAgent] = None
-
-
-def get_investigation_agent() -> InvestigationAgent:
-    global _investigation_agent
-
-    if _investigation_agent is None:
-        _investigation_agent = InvestigationAgent()
-
-    return _investigation_agent
-
-
-def analyze_investigation(
-    cross_modal_result: Optional[Dict[str, Any]] = None,
-    text_result: Optional[Dict[str, Any]] = None,
-    image_result: Optional[Dict[str, Any]] = None,
-    satellite_result: Optional[Dict[str, Any]] = None,
-    sensor_result: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-
-    return get_investigation_agent().analyze(
-        cross_modal_result=cross_modal_result,
-        text_result=text_result,
-        image_result=image_result,
-        satellite_result=satellite_result,
-        sensor_result=sensor_result,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Local test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import json
-
-    print("=" * 72)
-    print("TRUTHCHAIN AGRICULTURE INVESTIGATION AGENT TEST")
-    print("=" * 72)
-
-    # Representative successful CrossModal result.
-    # These values correspond to the contract already tested by
-    # CrossModalAgent.
-
-    cross_modal_result = {
-        "agent": "CrossModalAgent",
-        "domain": "agriculture",
-        "confidence": 0.960714,
-        "risk_score": 0.025,
-        "decision": "PASS",
-        "evidence": [
-            "ImageAgent crop evidence matches claimed crop 'Wheat'.",
-            "SatelliteAgent crop evidence matches claimed crop 'Wheat'.",
-            "Environmental/narrative evidence supports claimed event "
-            "'Heavy rain'.",
-        ],
-        "contradictions": [],
-        "model_version": "agriculture-cross-modal-agent-v0.1",
-        "processing_time_ms": 1.0,
-        "claimed_crop": "Wheat",
-        "claimed_event": "Heavy rain",
-        "claimed_loss_percent": 65.0,
-        "event_date": "2026-09-17",
-        "location": "Rampur",
-        "agreement_score": 0.928571,
-        "contradiction_count": 0,
-        "cross_modal_checks": [
-            {
-                "name": "crop_consistency",
-                "status": "PASS",
-                "score": 1.0,
-                "evidence": [
-                    "ImageAgent crop evidence matches claimed crop "
-                    "'Wheat'.",
-                    "SatelliteAgent crop evidence matches claimed crop "
-                    "'Wheat'.",
-                ],
-                "contradictions": [],
-            },
-            {
-                "name": "event_consistency",
-                "status": "PASS",
-                "score": 1.0,
-                "evidence": [
-                    "Environmental/narrative evidence supports claimed "
-                    "event 'Heavy rain'.",
-                ],
-                "contradictions": [],
-            },
-            {
-                "name": "loss_consistency",
-                "status": "PASS",
-                "score": 0.5,
-                "evidence": [
-                    "Claimed crop loss is 65.00%; available evidence "
-                    "modalities for contextual review: ImageAgent, "
-                    "SatelliteAgent, SensorAgent.",
-                ],
-                "contradictions": [],
-            },
-            {
-                "name": "context_consistency",
-                "status": "PASS",
-                "score": 1.0,
-                "evidence": [
-                    "Satellite scene acquisition date matches the "
-                    "claim event date.",
-                    "Sensor evidence date matches the claim event date.",
-                ],
-                "contradictions": [],
-            },
-            {
-                "name": "modality_health",
-                "status": "PASS",
-                "score": 1.0,
-                "evidence": [],
-                "contradictions": [],
-            },
-        ],
-    }
-
-    text_result = {
-        "agent": "TextAgent",
-        "decision": "PASS",
-        "event_date": "2026-09-17",
-        "location": "Rampur",
-        "extracted_crop": "Wheat",
-        "claimed_loss_percent": 65.0,
-        "damage_types": [
-            "Heavy rain",
-            "Waterlogging",
-        ],
-    }
-
-    image_result = {
-        "agent": "ImageAgent",
-        "decision": "PASS",
-        "predicted_crop": "Wheat",
-        "claimed_crop": "Wheat",
-    }
-
-    satellite_result = {
-        "agent": "SatelliteAgent",
-        "decision": "PASS",
-        "predicted_crop": "Wheat",
-        "claimed_crop": "Wheat",
-        "evidence_decision": "SUPPORT",
-        "scene_id": (
-            "S2C_MSIL2A_20260917T051651_N0512_R062_"
-            "T44RMQ_20260917T101515"
-        ),
-        "scene_datetime": "2026-09-17T05:16:51.025000Z",
-    }
-
-    sensor_result = {
-        "agent": "SensorAgent",
-        "decision": "PASS",
-        "claimed_event": "Heavy rain",
-        "detected_events": [
-            "Heavy rain",
-            "Waterlogging",
-        ],
-        "event_date": "2026-09-17",
-        "location": "Rampur",
-    }
-
-    print("\nINVESTIGATION INPUT")
-    print("-" * 72)
-
-    print(
-        json.dumps(
-            {
-                "cross_modal": cross_modal_result,
-                "text": text_result,
-                "image": image_result,
-                "satellite": satellite_result,
-                "sensor": sensor_result,
-            },
-            indent=2,
-        )
-    )
-
-    result = analyze_investigation(
-        cross_modal_result=cross_modal_result,
-        text_result=text_result,
-        image_result=image_result,
-        satellite_result=satellite_result,
-        sensor_result=sensor_result,
-    )
-
-    print("\nINVESTIGATION RESULT")
-    print("-" * 72)
-
-    print(
-        json.dumps(
-            result,
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
-
-    print("-" * 72)
-
-    if result["decision"] != "ERROR":
-        print("INVESTIGATION AGENT TEST: PASS")
-    else:
-        print("INVESTIGATION AGENT TEST: FAIL")

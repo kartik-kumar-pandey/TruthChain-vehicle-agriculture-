@@ -5,6 +5,8 @@ Test script for TruthChain 2.0 Agriculture Domain Pipeline
 import sys
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding='utf-8')
+
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -16,9 +18,9 @@ sample_claim = {
     "domain": "agriculture",
     "data": {
         "claim_id": "AGRI-001",
-        "claim_text": "Wheat crop in Village Rampur, District Lucknow, field area 2 hectares. Heavy rain occurred on 2026-09-17 causing 65% crop loss.",
-        "claimed_crop": "Wheat",
-        "crop": "Wheat",
+        "claim_text": "Sugarcane crop in Village Rampur, District Lucknow, field area 2 hectares. Heavy rain occurred on 2026-09-17 causing 65% crop loss.",
+        "claimed_crop": "Sugarcane",
+        "crop": "Sugarcane",
         "field_area_hectares": 2.0,
         "event": "Heavy rain",
         "event_date": "2026-09-17",

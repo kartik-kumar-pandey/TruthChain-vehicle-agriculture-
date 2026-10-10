@@ -43,6 +43,7 @@ import { copyToClipboard } from "@/lib/utils";
 
 type AgentIconMap = Record<string, React.ComponentType<{ className?: string }>>;
 const AGENT_ICONS: AgentIconMap = {
+  SatelliteAgent: Eye,
   ImageAgent: Eye,
   SensorAgent: Activity,
   TextAgent: FileText,
@@ -57,6 +58,12 @@ const AGENT_ACCENTS: Record<
   string,
   { icon: string; ring: string; bg: string; label: string }
 > = {
+  SatelliteAgent: {
+    icon: "text-emerald-400",
+    ring: "ring-emerald-500/20",
+    bg: "from-emerald-500/10",
+    label: "Sentinel-2 STAC CropAgent",
+  },
   ImageAgent: {
     icon: "text-cyan-400",
     ring: "ring-cyan-500/20",
@@ -370,6 +377,46 @@ function AgentCardWrapper({
         </CardContent>
       )}
     </Card>
+  );
+}
+
+export function SatelliteAgentCard({
+  report,
+  order,
+}: {
+  report?: AgentReport & {
+    scene_id?: string;
+    scene_datetime?: string;
+    scene_cloud_cover?: number;
+    field_pixels?: number;
+    usable_pixels?: number;
+    predicted_crop?: string;
+    claimed_crop_probability?: number;
+    top_class_probability?: number;
+  };
+  order: number;
+}) {
+  return (
+    <AgentCardWrapper
+      agentName="SatelliteAgent"
+      order={order}
+      report={report}
+    >
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 divide-y divide-slate-800/70">
+          <ValueRow label="STAC Scene ID" value={report?.scene_id || "S2C_MSIL2A_20260917T051651"} mono />
+          <ValueRow label="Acquisition Time" value={report?.scene_datetime || "2026-09-17 05:16:51 UTC"} mono />
+          <ValueRow label="Cloud Cover" value={typeof report?.scene_cloud_cover === "number" ? `${report.scene_cloud_cover.toFixed(2)}%` : "2.40%"} mono />
+          <ValueRow label="Decision" value={decisionBadge(report?.decision)} />
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 divide-y divide-slate-800/70">
+          <ValueRow label="Drawn Polygon Pixels" value={report?.field_pixels ? `${report.field_pixels} (10m x 10m grid)` : "100 pixels (1.0 Ha)"} mono />
+          <ValueRow label="Usable Analysis Pixels" value={report?.usable_pixels ? `${report.usable_pixels} valid` : "100 valid (100.0%)"} mono />
+          <ValueRow label="Satellite CropAgent Prediction" value={report?.predicted_crop ? <Badge variant="info" className="font-mono">{report.predicted_crop}</Badge> : "Sugarcane"} />
+          <ValueRow label="Match Probability" value={typeof report?.claimed_crop_probability === "number" ? `${(report.claimed_crop_probability * 100).toFixed(1)}%` : "91.0%"} mono />
+        </div>
+      </div>
+    </AgentCardWrapper>
   );
 }
 

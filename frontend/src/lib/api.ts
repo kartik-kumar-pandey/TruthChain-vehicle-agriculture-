@@ -1,4 +1,4 @@
-import { API_BASE_URL } from "./constants";
+import { API_BASE_URL, BACKEND_URL } from "./constants";
 import type {
   ConsensusRequest,
   ConsensusResponse,
@@ -19,13 +19,19 @@ import type {
   VisionPredictResponse,
 } from "@/types/api";
 
-async function request<T>(
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+function getStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("truthchain_auth_token");
+}
+
+/** Request to the Python AI service (port 8000) — no auth header needed */
+async function aiRequest<T>(
   path: string,
   options: RequestInit = {},
-  useProxy = false,
 ): Promise<T> {
-  const base = useProxy ? "" : API_BASE_URL;
-  const url = `${base}${path}`;
+  const url = `${API_BASE_URL}${path}`;
 
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string>),
@@ -39,11 +45,39 @@ async function request<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(url, {
-    ...options,
-    headers,
-  });
+  const res = await fetch(url, { ...options, headers });
+  return handleResponse<T>(res);
+}
 
+/** Request to the Node/Fastify backend (port 4000) — attaches Bearer token */
+async function backendRequest<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const token = getStoredToken();
+  const url = `${BACKEND_URL}${path}`;
+
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string>),
+  };
+
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  if (
+    options.body &&
+    !(options.body instanceof FormData) &&
+    !headers["Content-Type"]
+  ) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const res = await fetch(url, { ...options, headers });
+  return handleResponse<T>(res);
+}
+
+async function handleResponse<T>(res: Response): Promise<T> {
   const contentType = res.headers.get("content-type") || "";
   const isJson = contentType.includes("application/json");
 
@@ -76,75 +110,47 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
+// ─── API surface ─────────────────────────────────────────────────────────────
+
 export const api = {
+  // ── AI Service (port 8000) ──────────────────────────────────────────────
+
   root(): Promise<RootResponse> {
-    return request<RootResponse>("/");
+    return aiRequest<RootResponse>("/");
   },
 
   health(): Promise<HealthResponse> {
-    return request<HealthResponse>("/health");
+    return aiRequest<HealthResponse>("/health");
   },
 
   ready(): Promise<ReadyResponse> {
-    return request<ReadyResponse>("/ready");
+    return aiRequest<ReadyResponse>("/ready");
   },
 
   systemInfo(): Promise<SystemInfoResponse> {
-    return request<SystemInfoResponse>("/api/v1/system/info");
+    return aiRequest<SystemInfoResponse>("/api/v1/system/info");
   },
 
   async visionPredict(file: File): Promise<VisionPredictResponse> {
     const form = new FormData();
     form.append("file", file);
-    return request<VisionPredictResponse>("/api/v1/vision/predict", {
+    return aiRequest<VisionPredictResponse>("/api/v1/vision/predict", {
       method: "POST",
       body: form,
     });
   },
 
   evaluateClaim(payload: ConsensusRequest): Promise<ConsensusResponse> {
-    return request<ConsensusResponse>("/api/v1/consensus/evaluate", {
+    return aiRequest<ConsensusResponse>("/api/v1/consensus/evaluate", {
       method: "POST",
       body: JSON.stringify(payload),
     });
   },
 
-  evaluateAgricultureClaim(payload: Record<string, unknown>): Promise<ConsensusResponse> {
-    return request<ConsensusResponse>("/api/v1/agriculture/claim", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  },
-
-  getClaim(claimId: string): Promise<ClaimResult> {
-    return request<ClaimResult>(`/api/v1/claims/${encodeURIComponent(claimId)}`);
-  },
-
-  listClaims(): Promise<ClaimsListResponse> {
-    return request<ClaimsListResponse>("/api/v1/claims");
-  },
-
-  getBlockchainStatus(): Promise<BlockchainStatus> {
-    return request<BlockchainStatus>("/api/v1/blockchain/status");
-  },
-
-  listBlockchainRecords(limit = 50): Promise<BlockchainRecord[]> {
-    const safeLimit = Math.max(1, Math.min(limit, 500));
-    return request<BlockchainRecord[]>(
-      `/api/v1/blockchain/records?limit=${safeLimit}`,
-    );
-  },
-
-  getBlockchainRecord(recordId: string): Promise<BlockchainRecord> {
-    return request<BlockchainRecord>(
-      `/api/v1/blockchain/record/${encodeURIComponent(recordId)}`,
-    );
-  },
-
-  verifyBlockchainRecord(
-    payload: BlockchainVerifyRequest,
-  ): Promise<BlockchainVerifyResponse> {
-    return request<BlockchainVerifyResponse>("/api/v1/blockchain/verify", {
+  evaluateAgricultureClaim(
+    payload: Record<string, unknown>,
+  ): Promise<ConsensusResponse> {
+    return aiRequest<ConsensusResponse>("/api/v1/agriculture/claim", {
       method: "POST",
       body: JSON.stringify(payload),
     });
@@ -170,7 +176,45 @@ export const api = {
     message?: string;
     meta: { processing_time_ms: number; request_id: string };
   }> {
-    return request("/api/v1/satellite/preview", {
+    return aiRequest("/api/v1/satellite/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // ── Node/Fastify Backend (port 4000) — require auth ────────────────────
+
+  listClaims(): Promise<ClaimsListResponse> {
+    return backendRequest<ClaimsListResponse>("/api/v1/claims");
+  },
+
+  getClaim(claimId: string): Promise<ClaimResult> {
+    return backendRequest<ClaimResult>(
+      `/api/v1/claims/${encodeURIComponent(claimId)}`,
+    );
+  },
+
+  getBlockchainStatus(): Promise<BlockchainStatus> {
+    return backendRequest<BlockchainStatus>("/api/v1/blockchain/status");
+  },
+
+  listBlockchainRecords(limit = 50): Promise<BlockchainRecord[]> {
+    const safeLimit = Math.max(1, Math.min(limit, 500));
+    return backendRequest<BlockchainRecord[]>(
+      `/api/v1/blockchain/records?limit=${safeLimit}`,
+    );
+  },
+
+  getBlockchainRecord(recordId: string): Promise<BlockchainRecord> {
+    return backendRequest<BlockchainRecord>(
+      `/api/v1/blockchain/record/${encodeURIComponent(recordId)}`,
+    );
+  },
+
+  verifyBlockchainRecord(
+    payload: BlockchainVerifyRequest,
+  ): Promise<BlockchainVerifyResponse> {
+    return backendRequest<BlockchainVerifyResponse>("/api/v1/blockchain/verify", {
       method: "POST",
       body: JSON.stringify(payload),
     });

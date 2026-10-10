@@ -45,7 +45,7 @@ export function Copyable({
         className={cn(
           "text-sm",
           mono ? "font-mono" : "",
-          "text-slate-200",
+          "text-slate-700 dark:text-slate-200",
           className,
         )}
         title={value}
@@ -55,7 +55,7 @@ export function Copyable({
       <button
         type="button"
         onClick={onCopy}
-        className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-700 bg-slate-800/50 text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors shrink-0"
+        className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800/50 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200 transition-colors shrink-0"
         title="Copy to clipboard"
       >
         {copied ? (
