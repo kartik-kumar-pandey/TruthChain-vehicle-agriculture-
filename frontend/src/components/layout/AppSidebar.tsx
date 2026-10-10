@@ -154,8 +154,13 @@ export function AppSidebar() {
             AssessmentRegistry · Sepolia
           </div>
         </div>
-        <div className="text-[10px] font-mono text-slate-400 dark:text-slate-500 leading-relaxed">
-          OFF-CHAIN AI EVIDENCE + ON-CHAIN PROOF
+        <div className="text-[10px] font-mono text-slate-400 dark:text-slate-500 leading-relaxed flex items-center justify-between">
+          <span>TruthChain Enterprise</span>
+          <div className="flex gap-2">
+            <Link href="/privacy" className="hover:underline">Privacy</Link>
+            <span>·</span>
+            <Link href="/terms" className="hover:underline">Terms</Link>
+          </div>
         </div>
       </div>
     </aside>

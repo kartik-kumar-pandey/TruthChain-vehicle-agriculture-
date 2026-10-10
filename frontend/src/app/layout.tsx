@@ -4,9 +4,12 @@ import { QueryProvider } from "./providers";
 import { AppShell } from "@/components/layout/AppShell";
 
 export const metadata: Metadata = {
-  title: "TruthChain 2.0 · AI Consensus & Blockchain Fraud Verification",
+  title: "TruthChain 2.0 · Enterprise Insurance Verification",
   description:
-    "TruthChain 8-Agent AI Consensus Engine with Sepolia AssessmentRegistry for motor insurance fraud detection and cryptographic evidence verification.",
+    "TruthChain AI Consensus Engine with Sepolia AssessmentRegistry for insurance fraud detection and cryptographic evidence verification.",
+  icons: {
+    icon: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({
